@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useCallback } from "react";
+import { useRouter } from "next/navigation";
 import { Loader2 } from "lucide-react";
 import {
   createSignalpilotClient,
@@ -35,10 +36,15 @@ export default function NotebookBoot({
   children?: React.ReactNode;
 }) {
   const config = useNotebookConfig();
+  const router = useRouter();
   const [phase, setPhase] = useState<BootPhase>("health");
   const [error, setError] = useState<string | null>(null);
   const clientRef = useRef<SignalpilotClient | null>(null);
   const [ready, setReady] = useState(false);
+
+  const hostNavigate = useCallback((href: string) => {
+    router.push(href);
+  }, [router]);
 
   useEffect(() => {
     let cancelled = false;
@@ -134,6 +140,7 @@ export default function NotebookBoot({
           lazy: false,
         },
         writeDocumentTitle: false,
+        navigate: hostNavigate,
       });
 
       // The RuntimeManager was just created with lazy=false, which triggers
@@ -162,7 +169,7 @@ export default function NotebookBoot({
       }
       setReady(false);
     };
-  }, [config.sessionId, config.token, config.gatewayUrl, config.project, config.branch]);
+  }, [config.sessionId, config.token, config.gatewayUrl, config.project, config.branch, hostNavigate]);
 
   if (error) {
     return (

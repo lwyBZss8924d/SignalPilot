@@ -139,12 +139,13 @@ test.describe("Real User Flow", () => {
     const ts = timer();
     const project = pickProject();
 
-    if (!project || project.files.length === 0) {
-      ts("SKIP: no project with files");
+    if (!project) {
+      ts("SKIP: no projects at all");
       return;
     }
 
-    ts(`Target: ${project.name} with ${project.files.length} files`);
+    // Files may live on the pod even if the API reports 0
+    ts(`Target: ${project.name} (API reports ${project.files.length} files — pod may have more)`);
 
     // Navigate to project workspace
     ts("goto /projects");

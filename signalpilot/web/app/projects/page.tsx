@@ -124,6 +124,27 @@ export default function ProjectsPage() {
     };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Sync URL param changes into the existing config.
+  // When the notebook's navigate() fires (project click, file click),
+  // Next.js router updates the URL and useSearchParams re-renders.
+  // This effect patches the config so NotebookBoot sees the new file/project.
+  useEffect(() => {
+    if (notebookConfig && state === "ready") {
+      const newProject = urlProject || undefined;
+      const newBranch = urlBranch || undefined;
+      const newFile = urlFile || undefined;
+      if (
+        newProject !== notebookConfig.project ||
+        newBranch !== notebookConfig.branch ||
+        newFile !== notebookConfig.file
+      ) {
+        setNotebookConfig((prev) =>
+          prev ? { ...prev, project: newProject, branch: newBranch, file: newFile } : prev,
+        );
+      }
+    }
+  }, [urlProject, urlBranch, urlFile, state]); // eslint-disable-line react-hooks/exhaustive-deps
+
   async function launch(existingApiKey?: string) {
     setState("loading");
     setLaunchStatus("creating session...");
