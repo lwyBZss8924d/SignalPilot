@@ -63,11 +63,16 @@ from signalpilot._server.workspace import (
     infer_workspace,
 )
 from signalpilot._session.model import SessionMode
-from signalpilot._tutorials import (
-    Tutorial,
-    create_temp_tutorial_file,
-    tutorial_order,
-)  # type: ignore
+try:
+    from signalpilot._tutorials import (
+        Tutorial,
+        create_temp_tutorial_file,
+        tutorial_order,
+    )
+except ImportError:
+    Tutorial = None  # type: ignore[assignment,misc]
+    create_temp_tutorial_file = None  # type: ignore[assignment]
+    tutorial_order = []  # type: ignore[var-annotated]
 from signalpilot._utils.http import HTTPException, HTTPStatus
 from signalpilot._utils.sp_path import SpPath, create_temp_notebook_file
 from signalpilot._utils.platform import is_windows

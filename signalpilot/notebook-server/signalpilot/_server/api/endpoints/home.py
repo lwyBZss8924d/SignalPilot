@@ -28,7 +28,10 @@ from signalpilot._server.workspace import (
     flatten_files,
 )
 from signalpilot._session.model import ConnectionState, SessionMode
-from signalpilot._tutorials import create_temp_tutorial_file  # type: ignore
+try:
+    from signalpilot._tutorials import create_temp_tutorial_file
+except ImportError:
+    create_temp_tutorial_file = None  # type: ignore[assignment]
 from signalpilot._utils.http import HTTPException, HTTPStatus
 from signalpilot._utils.paths import pretty_path
 

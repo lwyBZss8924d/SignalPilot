@@ -23,4 +23,11 @@ export function initStoreOnce(store: JotaiStore, options: unknown): void {
   }
   _initialized.add(store);
   initStore(options, store);
+
+  // Register web component plugins (sp-table, sp-stat, sp-dropdown, etc.)
+  // so cell outputs with custom elements render correctly.
+  // The standalone mount path does this in mount.tsx; the embed path needs it here.
+  void import("@/plugins/plugins-react").then((m) =>
+    m.initializeReactPlugins(),
+  );
 }

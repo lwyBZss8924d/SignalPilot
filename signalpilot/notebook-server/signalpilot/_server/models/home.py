@@ -3,7 +3,10 @@ from __future__ import annotations
 import msgspec
 
 from signalpilot._server.models.files import FileInfo
-from signalpilot._tutorials import Tutorial  # type: ignore
+try:
+    from signalpilot._tutorials import Tutorial
+except ImportError:
+    Tutorial = None  # type: ignore[assignment,misc]
 from signalpilot._types.ids import SessionId
 
 
