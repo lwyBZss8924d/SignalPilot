@@ -185,29 +185,21 @@ async def kernel_warmup(app: Starlette) -> AsyncIterator[None]:
     """Pre-warm kernel infrastructure for fast EDIT-mode startup.
 
     Eagerly imports heavy modules (benefits forkserver on Linux and
-    filesystem cache everywhere) and pre-allocates multiprocessing
-    queues so the first session connect is near-instant.
+    filesystem cache everywhere). Configures forkserver preload on the
+    main thread before any kernel processes are created.
     """
     state = AppState.from_app(app)
     manager: SessionManager = state.session_manager
 
     if manager.mode == SessionMode.EDIT:
-        from signalpilot._session.managers.kernel_pool import (
-            initialize_pool,
-            preload_kernel_modules,
-            shutdown_pool,
-        )
+        from signalpilot._session.managers._mp_context import configure_forkserver
+        from signalpilot._session.managers.warmup import preload_kernel_modules
 
+        configure_forkserver()
         preload_kernel_modules()
-        initialize_pool(pool_size=1)
         LOGGER.debug("Kernel pre-warming complete")
 
     yield
-
-    if manager.mode == SessionMode.EDIT:
-        from signalpilot._session.managers.kernel_pool import shutdown_pool
-
-        shutdown_pool()
 
 
 @contextlib.asynccontextmanager

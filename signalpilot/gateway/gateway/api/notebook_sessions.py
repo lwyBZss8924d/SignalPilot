@@ -102,7 +102,11 @@ async def create_session(body: NotebookSessionCreate, store: StoreD, response: R
         )
         session_info.status = "running"
         session_info.pod_ip = host_port
-        session_info.notebook_url = f"/notebook/{session_info.id}/_init?token={session_info.access_token}"
+        # Fetch the real token — session_info.access_token is always None
+        # in FE-facing responses (stripped by _to_info for security).
+        internal = await ns.get_session_internal(store.session, session_id=session_info.id)
+        real_token = internal.access_token if internal else ""
+        session_info.notebook_url = f"/notebook/{session_info.id}/_init?token={real_token}"
         return session_info
 
     pod = _pod_name(org_id, user_id)

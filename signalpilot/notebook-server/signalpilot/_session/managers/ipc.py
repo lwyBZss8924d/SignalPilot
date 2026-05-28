@@ -10,6 +10,7 @@ import os
 import signal
 import subprocess
 import sys
+import threading
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
@@ -53,8 +54,8 @@ def _get_venv_config(config_manager: SpConfigReader) -> VenvConfig:
     return cast(VenvConfig, config.get("venv", {}))
 
 
-class KernelStartupError(Exception):
-    """Raised when kernel subprocess fails to start."""
+# Backward-compatible re-export — canonical location is errors.py
+from signalpilot._session.managers.errors import KernelStartupError as KernelStartupError  # noqa: F811
 
 
 class IPCQueueManagerImpl(QueueManager):
@@ -329,9 +330,41 @@ class IPCKernelManagerImpl(KernelManager):
             self._process.stdin.flush()
             self._process.stdin.close()
 
-            # Wait for ready signal
+            # Wait for ready signal with timeout — prevents infinite hang
+            # if the subprocess deadlocks during startup.
             assert self._process.stdout is not None
-            ready = self._process.stdout.readline().decode().strip()
+            _STARTUP_TIMEOUT_S = 30.0
+            ready_result: dict[str, str] = {}
+
+            def _read_ready() -> None:
+                try:
+                    assert self._process.stdout is not None
+                    ready_result["line"] = self._process.stdout.readline().decode().strip()
+                except Exception as e:
+                    ready_result["error"] = str(e)
+
+            reader = threading.Thread(target=_read_ready, daemon=True)
+            reader.start()
+            reader.join(timeout=_STARTUP_TIMEOUT_S)
+
+            if reader.is_alive():
+                # Timed out — kill the subprocess
+                self._process.kill()
+                assert self._process.stderr is not None
+                stderr = self._process.stderr.read().decode()
+                raise KernelStartupError(
+                    f"Kernel subprocess did not signal KERNEL_READY "
+                    f"within {_STARTUP_TIMEOUT_S}s.\n\n"
+                    f"Command: {' '.join(cmd)}\n\n"
+                    f"Stderr:\n{stderr}"
+                )
+
+            if "error" in ready_result:
+                raise KernelStartupError(
+                    f"Error reading kernel ready signal: {ready_result['error']}"
+                )
+
+            ready = ready_result.get("line", "")
             if ready != "KERNEL_READY":
                 assert self._process.stderr is not None
                 stderr = self._process.stderr.read().decode()

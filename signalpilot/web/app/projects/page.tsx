@@ -110,14 +110,22 @@ export default function ProjectsPage() {
       }
 
       try {
-        const session = await getNotebookSession();
+        const session = await getNotebookSession() as any;
         if (!cancelled && session?.status === "running" && session.id && session.notebook_url) {
-          const config = buildConfig(session.id, session.notebook_url, apiKey);
-          if (config) {
-            setNotebookConfig(config);
-            setState("ready");
-            startPing();
-            return;
+          // If deep-linking to a specific project, verify the session matches.
+          // A stale session from a different project would route to the wrong files.
+          const sessionProject = session.project_id || "";
+          if (urlProject && sessionProject && sessionProject !== urlProject) {
+            console.log("[projects] Session project mismatch — deleting stale session");
+            await deleteNotebookSession().catch(() => {});
+          } else {
+            const config = buildConfig(session.id, session.notebook_url, apiKey);
+            if (config) {
+              setNotebookConfig(config);
+              setState("ready");
+              startPing();
+              return;
+            }
           }
         }
       } catch (err) {

@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 from signalpilot._session.managers._mp_context import get_mp_context
+from signalpilot._session.managers.errors import KernelStartupError
 
 from signalpilot import _loggers
 from signalpilot._config.settings import GLOBAL_SETTINGS
@@ -33,6 +34,9 @@ if TYPE_CHECKING:
     from signalpilot._types.ids import CellId_t
 
 LOGGER = _loggers.sp_logger()
+
+_KERNEL_CONNECT_TIMEOUT_S = 30.0
+_PROFILE_WAIT_TIMEOUT_S = 10.0
 
 
 class KernelManagerImpl(KernelManager):
@@ -61,19 +65,19 @@ class KernelManagerImpl(KernelManager):
         self.config_manager = config_manager
         self.redirect_console_to_browser = redirect_console_to_browser
 
-        # Only used in edit mode
         self._read_conn: TypedConnection[KernelMessage] | None = None
         self._virtual_file_storage = virtual_file_storage
 
     def start_kernel(self) -> None:
-        # We use a process in edit mode so that we can interrupt the app
-        # with a SIGINT; we don't mind the additional memory consumption,
-        # since there's only one client session
         is_edit_mode = self.mode == SessionMode.EDIT
         listener = None
         if is_edit_mode:
-            # Need to use a socket for windows compatibility
+            LOGGER.info(
+                "Kernel start: creating listener (mode=%s, file=%s)",
+                self.mode, self.app_metadata.filename,
+            )
             listener = connection.Listener(family="AF_INET")
+            LOGGER.info("Kernel start: listener at %s", listener.address)
             self.kernel_task = get_mp_context().Process(
                 target=runtime.launch_kernel,
                 args=(
@@ -81,7 +85,6 @@ class KernelManagerImpl(KernelManager):
                     self.queue_manager.set_ui_element_queue,
                     self.queue_manager.completion_queue,
                     self.queue_manager.input_queue,
-                    # stream queue unused
                     None,
                     listener.address,
                     is_edit_mode,
@@ -93,43 +96,24 @@ class KernelManagerImpl(KernelManager):
                     self.queue_manager.win32_interrupt_queue,
                     self.profile_path,
                     GLOBAL_SETTINGS.LOG_LEVEL,
-                    # is_ipc
                     False,
-                    # PID
                     os.getpid(),
                 ),
-                # The process can't be a daemon, because daemonic processes
-                # can't create children
-                # https://docs.python.org/3/library/multiprocessing.html#multiprocessing.Process.daemon
                 daemon=False,
             )
         else:
-            # We use threads in run mode to minimize memory consumption;
-            # launching a process would copy the entire program state,
-            # which (as of writing) is around 150MB
-
-            # We can't terminate threads, so we have to wait until they
-            # naturally exit before cleaning up resources
-            def launch_kernel_with_cleanup(
-                *args: Any,
-            ) -> None:
+            def launch_kernel_with_cleanup(*args: Any) -> None:
                 runtime.launch_kernel(*args)
 
-            # install formatter import hooks, which will be shared by all
-            # threads (in edit mode, the single kernel process installs
-            # formatters ...)
             register_formatters(theme=self.config_manager.theme)
 
             if self.redirect_console_to_browser:
                 from signalpilot._messaging.thread_local_streams import (
                     install_thread_local_proxies,
                 )
-
                 install_thread_local_proxies()
 
             assert self.queue_manager.stream_queue is not None
-            # Make threads daemons so killing the server immediately brings
-            # down all client sessions
             self.kernel_task = threading.Thread(
                 target=launch_kernel_with_cleanup,
                 args=(
@@ -138,7 +122,6 @@ class KernelManagerImpl(KernelManager):
                     self.queue_manager.completion_queue,
                     self.queue_manager.input_queue,
                     self.queue_manager.stream_queue,
-                    # IPC not used in run mode
                     None,
                     is_edit_mode,
                     self.configs,
@@ -146,57 +129,95 @@ class KernelManagerImpl(KernelManager):
                     self.config_manager.get_config(hide_secrets=False),
                     self._virtual_file_storage,
                     self.redirect_console_to_browser,
-                    # win32 interrupt queue
                     None,
-                    # profile path
                     None,
-                    # log level
                     GLOBAL_SETTINGS.LOG_LEVEL,
                 ),
-                # daemon threads can create child processes, unlike
-                # daemon processes
                 daemon=True,
             )
 
+        LOGGER.info("Starting kernel task (parent pid=%d)", os.getpid())
         self.kernel_task.start()  # type: ignore
+        LOGGER.info(
+            "Kernel task started (pid=%s, alive=%s)",
+            getattr(self.kernel_task, "pid", "thread"),
+            self.kernel_task.is_alive(),
+        )
+
         if listener is not None:
-            # Listener.accept() has no timeout. Run it on a helper thread so
-            # the main path can watchdog kernel_task liveness; otherwise a
-            # child that dies before connecting leaves us blocked forever.
-            result: dict[str, Any] = {}
+            self._wait_for_kernel_connect(listener)
 
-            def _accept() -> None:
-                try:
-                    result["conn"] = listener.accept()
-                except Exception as e:
-                    result["error"] = e
+    def _wait_for_kernel_connect(self, listener: connection.Listener) -> None:
+        """Wait for the kernel subprocess to connect back via the listener.
 
-            accept_thread = threading.Thread(
-                target=_accept, name="kernel-accept", daemon=True
-            )
-            accept_thread.start()
-            while True:
-                accept_thread.join(timeout=0.5)
-                if not accept_thread.is_alive():
-                    break
-                if not self.kernel_task.is_alive():  # type: ignore[attr-defined]
-                    # Closing the listener unblocks accept() in the helper
-                    # thread so it can exit cleanly instead of leaking.
-                    listener.close()
-                    accept_thread.join(timeout=1.0)
-                    raise RuntimeError(
-                        "sp kernel subprocess exited before "
-                        "connecting (exitcode="
-                        f"{getattr(self.kernel_task, 'exitcode', None)})"
-                        "; check subprocess stderr for the cause"
-                    )
-            if "error" in result:
-                raise result["error"]
-            self._read_conn = TypedConnection[KernelMessage].of(result["conn"])
+        Bounded by _KERNEL_CONNECT_TIMEOUT_S. Raises KernelStartupError
+        if the kernel dies or times out before connecting.
+        """
+        result: dict[str, Any] = {}
+
+        def _accept() -> None:
+            try:
+                result["conn"] = listener.accept()
+            except Exception as e:
+                result["error"] = e
+
+        accept_thread = threading.Thread(
+            target=_accept, name="kernel-accept", daemon=True
+        )
+        accept_thread.start()
+        t0 = time.monotonic()
+
+        while True:
+            accept_thread.join(timeout=0.5)
+            elapsed = time.monotonic() - t0
+
+            if not accept_thread.is_alive():
+                LOGGER.info("Kernel connected after %.1fs", elapsed)
+                break
+
+            kernel_alive = self.kernel_task.is_alive()  # type: ignore[attr-defined]
+            exitcode = getattr(self.kernel_task, "exitcode", None)
+
+            if int(elapsed) % 5 == 0 and elapsed > 1:
+                LOGGER.info(
+                    "Waiting for kernel connect (%.1fs, alive=%s, exitcode=%s)",
+                    elapsed, kernel_alive, exitcode,
+                )
+
+            if not kernel_alive:
+                LOGGER.error(
+                    "Kernel died before connecting (exitcode=%s, %.1fs)",
+                    exitcode, elapsed,
+                )
+                listener.close()
+                accept_thread.join(timeout=1.0)
+                raise KernelStartupError(
+                    f"Kernel subprocess exited before connecting "
+                    f"(exitcode={exitcode}); check subprocess stderr"
+                )
+
+            if elapsed >= _KERNEL_CONNECT_TIMEOUT_S:
+                LOGGER.error(
+                    "Kernel connect timeout after %.1fs (alive=%s)",
+                    elapsed, kernel_alive,
+                )
+                listener.close()
+                accept_thread.join(timeout=1.0)
+                try_kill_process_and_group(self.kernel_task)
+                raise KernelStartupError(
+                    f"Kernel subprocess did not connect within "
+                    f"{_KERNEL_CONNECT_TIMEOUT_S}s"
+                )
+
+        if "error" in result:
+            LOGGER.error("Kernel accept error: %s", result["error"])
+            raise result["error"]
+
+        LOGGER.info("Kernel IPC connection established")
+        self._read_conn = TypedConnection[KernelMessage].of(result["conn"])
 
     @property
     def pid(self) -> int | None:
-        """Get the PID of the kernel."""
         if self.kernel_task is None:
             return None
         if isinstance(self.kernel_task, threading.Thread):
@@ -232,7 +253,6 @@ class KernelManagerImpl(KernelManager):
             return
 
         if isinstance(self.kernel_task, threading.Thread):
-            # no interruptions in run mode
             return
 
         if self.kernel_task.pid is not None:
@@ -248,28 +268,29 @@ class KernelManagerImpl(KernelManager):
         assert self.kernel_task is not None, "kernel not started"
 
         if isinstance(self.kernel_task, threading.Thread):
-            # in run mode
             if self.kernel_task.is_alive():
-                # We don't join the kernel thread because we don't want to server
-                # to block on it finishing
                 self.queue_manager.put_control_request(
                     commands.StopKernelCommand()
                 )
             return
 
-        # Otherwise, we have something that is `ProcessLike`
         if self.profile_path is not None and self.kernel_task.is_alive():
             self.queue_manager.put_control_request(
                 commands.StopKernelCommand()
             )
-            # Hack: Wait for kernel to exit and write out profile;
-            # joining the process hangs, but not sure why.
             print_(
                 "\tWriting profile statistics to",
                 self.profile_path,
                 " ...",
             )
+            t0 = time.monotonic()
             while not os.path.exists(self.profile_path):
+                if time.monotonic() - t0 > _PROFILE_WAIT_TIMEOUT_S:
+                    LOGGER.warning(
+                        "Profile file not written after %.0fs, proceeding with cleanup",
+                        _PROFILE_WAIT_TIMEOUT_S,
+                    )
+                    break
                 time.sleep(0.1)
             time.sleep(1)
 

@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 
 import httpx
 import websockets
@@ -162,6 +163,7 @@ class NotebookProxy:
         - asyncio.TaskGroup: cancellation of either pump tears down both.
         """
         outbound_headers = _build_outbound_ws_headers(ws)
+        logger.info("WS PROXY connecting to upstream: %s", upstream_url)
 
         try:
             upstream_ws = await websockets.asyncio.client.connect(
@@ -169,15 +171,20 @@ class NotebookProxy:
                 additional_headers=outbound_headers,
             )
         except Exception as exc:
-            # M-6: Log at debug only — upstream URL contains pod IP.
-            logger.debug("Upstream WS connect failed: %s", exc)
+            logger.warning("WS PROXY upstream connect FAILED: %s: %s", type(exc).__name__, exc)
             await ws.close(code=1011)
             return
 
         await ws.accept()
+        logger.info("WS PROXY bridge established (client ↔ upstream)")
+
+        client_frames = 0
+        upstream_frames = 0
+        t0 = time.monotonic()
 
         async def _client_to_upstream() -> None:
             """Pump frames from the browser client to the upstream pod."""
+            nonlocal client_frames
             try:
                 while True:
                     data = await ws.receive()
@@ -186,19 +193,27 @@ class NotebookProxy:
                         text = data.get("text")
                         bytes_ = data.get("bytes")
                         if text is not None:
+                            client_frames += 1
                             await upstream_ws.send(text)
                         elif bytes_ is not None:
+                            client_frames += 1
                             await upstream_ws.send(bytes_)
                     elif msg_type == "websocket.disconnect":
                         code = data.get("code", 1000)
+                        logger.info("WS PROXY client disconnected: code=%s", code)
                         await upstream_ws.close(code)
                         break
             except WebSocketDisconnect as exc:
+                logger.info("WS PROXY client WebSocketDisconnect: code=%s", exc.code)
                 await upstream_ws.close(exc.code or 1000)
             except websockets.exceptions.ConnectionClosedOK:
-                pass
+                logger.info("WS PROXY upstream closed OK during client→upstream pump")
             except websockets.exceptions.ConnectionClosedError as exc:
-                logger.debug("Upstream WS closed with error during client→upstream: %s", exc)
+                logger.info(
+                    "WS PROXY upstream closed with error during client→upstream: code=%s reason='%s'",
+                    exc.rcvd.code if exc.rcvd else "?",
+                    exc.rcvd.reason if exc.rcvd else str(exc),
+                )
 
         async def _upstream_to_client() -> None:
             """Pump frames from the upstream pod to the browser client.
@@ -206,33 +221,47 @@ class NotebookProxy:
             recv() returns str for TEXT frames and bytes for BINARY frames —
             frame type is preserved automatically.
             """
+            nonlocal upstream_frames
             try:
                 while True:
                     try:
                         message = await upstream_ws.recv()
                     except websockets.exceptions.ConnectionClosedOK:
-                        # Upstream closed cleanly — forward code AND reason.
+                        close_code = upstream_ws.close_code or 1000
+                        close_reason = upstream_ws.close_reason or ""
+                        logger.info(
+                            "WS PROXY upstream closed cleanly: code=%s reason='%s'",
+                            close_code, close_reason,
+                        )
                         try:
-                            close_reason = upstream_ws.close_reason or ""
-                            await ws.close(code=upstream_ws.close_code or 1000, reason=close_reason)
+                            await ws.close(code=close_code, reason=close_reason)
                         except Exception:
                             pass
                         break
                     except websockets.exceptions.ConnectionClosedError as exc:
                         close_code = exc.rcvd.code if exc.rcvd else 1011
                         close_reason = exc.rcvd.reason if exc.rcvd else ""
-                        logger.debug("Upstream WS closed with error: code=%s reason=%s", close_code, close_reason)
+                        logger.info(
+                            "WS PROXY upstream closed with error: code=%s reason='%s'",
+                            close_code, close_reason,
+                        )
                         try:
                             await ws.close(code=close_code, reason=close_reason)
                         except Exception:
                             pass
                         break
+
+                    upstream_frames += 1
+                    if upstream_frames == 1:
+                        logger.info("WS PROXY first upstream frame received (%s, %d bytes)",
+                                    "TEXT" if isinstance(message, str) else "BINARY",
+                                    len(message))
                     if isinstance(message, str):
                         await ws.send_text(message)
                     else:
                         await ws.send_bytes(message)
             except WebSocketDisconnect:
-                pass
+                logger.info("WS PROXY client disconnected during upstream→client pump")
 
         try:
             async with asyncio.TaskGroup() as tg:
@@ -241,11 +270,14 @@ class NotebookProxy:
         except* (WebSocketDisconnect, websockets.exceptions.WebSocketException):
             pass
         except* Exception as eg:
-            # L-4: Log unexpected programming errors before swallowing so future
-            # regressions are visible. Only catches exceptions not matched above.
             for exc in eg.exceptions:
-                logger.warning("Unexpected error in WS pump TaskGroup: %r", exc)
+                logger.warning("WS PROXY unexpected error in pump TaskGroup: %r", exc)
         finally:
+            elapsed = time.monotonic() - t0
+            logger.info(
+                "WS PROXY session ended: duration=%.1fs client→upstream=%d frames upstream→client=%d frames",
+                elapsed, client_frames, upstream_frames,
+            )
             try:
                 await upstream_ws.close()
             except Exception:

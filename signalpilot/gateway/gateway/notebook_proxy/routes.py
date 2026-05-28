@@ -169,8 +169,11 @@ async def proxy_websocket(
     No RequireScope — see module docstring.
     """
     raw_query = ws.url.query
-    logger.info("WS HANDLER: session=%s path=%s query=%s upstream_base=%s",
-                session_id, path, raw_query, proxy_session.upstream_base)
+    logger.info(
+        "WS HANDLER: session=%s path=%s query=%s upstream_base=%s user=%s org=%s",
+        session_id, path, raw_query, proxy_session.upstream_base,
+        getattr(proxy_session, "user_id", "?"), getattr(proxy_session, "org_id", "?"),
+    )
     # M-3: Validate query string before forwarding to upstream.
     # Reject CR/LF and any char outside the safe URL charset to prevent response-
     # splitting and notebook server session-ID abuse via querystring manipulation.

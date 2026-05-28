@@ -92,6 +92,7 @@ services:
       SP_NOTEBOOK_IMAGE: signalpilot-notebook:latest
       SP_NOTEBOOK_UPSTREAM_MODE: pod_ip
       SP_NOTEBOOK_NETWORK_POLICY: "false"
+      SP_NOTEBOOK_DIRECT_URL: http://notebook:2718
       SP_GATEWAY_NAMESPACE: signalpilot
       SP_GATEWAY_POD_SELECTOR: "app=signalpilot-gateway"
       SP_PUBLIC_GATEWAY_PORT: "3300"

@@ -90,15 +90,34 @@ class ConnectionDistributor(Distributor[T]):
                 consumer(response)
 
     def start(self) -> Disposable:
-        """Start distributing the response."""
-        asyncio.get_event_loop().add_reader(
-            self.input_connection.fileno(), self._on_change
+        """Start distributing the response.
+
+        Uses a background thread to poll the connection instead of
+        asyncio add_reader, so it works from any thread (including
+        asyncio.to_thread worker threads that have no event loop).
+        """
+        self._stop_event = threading.Event()
+        self._thread = threading.Thread(
+            target=self._poll_loop, daemon=True, name="kernel-distributor"
         )
+        self._thread.start()
         return Disposable(self.stop)
+
+    def _poll_loop(self) -> None:
+        """Background thread: poll connection and distribute messages."""
+        while not self._stop_event.is_set():
+            try:
+                if self.input_connection.poll(timeout=0.1):
+                    self._on_change()
+            except (EOFError, OSError):
+                break
 
     def stop(self) -> None:
         """Stop distributing the response."""
-        asyncio.get_event_loop().remove_reader(self.input_connection.fileno())
+        if hasattr(self, "_stop_event"):
+            self._stop_event.set()
+        if hasattr(self, "_thread") and self._thread.is_alive():
+            self._thread.join(timeout=2.0)
         if not self.input_connection.closed:
             self.input_connection.close()
         self.consumers.clear()

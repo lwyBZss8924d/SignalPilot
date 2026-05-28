@@ -145,9 +145,31 @@ def _get_github_remote(project_id: str) -> str | None:
 # ── Local project directory ──────────────────────────────────────
 
 def local_project_dir(project_id: str, branch: str = "") -> Path:
-    """Single local path per project: ~/.sp/projects/{id}/{name}/"""
+    """Single local path per project: ~/.sp/projects/{id}/{name}/
+
+    Falls back to scanning the project directory when the gateway name
+    lookup fails (e.g. project deleted from DB but files still on disk).
+    """
     name = _get_project_name(project_id)
-    return PROJECTS_ROOT / project_id / name
+    resolved = PROJECTS_ROOT / project_id / name
+    if resolved.exists():
+        return resolved
+
+    # Name lookup returned the UUID itself (gateway unreachable or project
+    # not found). Scan the project directory for the actual subdirectory.
+    project_parent = PROJECTS_ROOT / project_id
+    if project_parent.exists():
+        subdirs = [d for d in project_parent.iterdir() if d.is_dir() and d.name != project_id]
+        if len(subdirs) == 1:
+            LOGGER.debug("Resolved project dir via scan: %s", subdirs[0])
+            return subdirs[0]
+        # Multiple subdirs or none — check for one with .git
+        git_dirs = [d for d in subdirs if (d / ".git").exists()]
+        if len(git_dirs) == 1:
+            LOGGER.debug("Resolved project dir via .git scan: %s", git_dirs[0])
+            return git_dirs[0]
+
+    return resolved
 
 
 # ── Sync operations ─────────────────────────────────────────────

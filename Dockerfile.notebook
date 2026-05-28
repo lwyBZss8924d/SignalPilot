@@ -32,10 +32,17 @@ RUN if [ -n "$GIT_TOKEN" ]; then \
     fi && \
     rm -rf /src/.git /src/frontend/node_modules /src/frontend/dist /src/.venv
 
-# ── Stage 3: Runtime ─────────────────────────────────────────────
+# ── Stage 3: Local patches ──────────────────────────────────────
+# Copy our local notebook-server source to overlay fixes (kernel pool
+# removal, deferred extensions, connection distributor, etc.) onto the
+# cloned upstream source.
+FROM alpine AS patcher
+COPY --from=source /src /src
+COPY signalpilot/notebook-server/signalpilot/ /src/signalpilot/
+
+# ── Stage 4: Runtime ─────────────────────────────────────────────
 FROM python:3.13-slim
 
-# Create non-root user FIRST so all subsequent layers are owned correctly.
 RUN groupadd -g 10001 notebook && \
     useradd -r -u 10001 -g notebook notebook && \
     mkdir -p /workspace /home/notebook/.sp && \
@@ -43,12 +50,9 @@ RUN groupadd -g 10001 notebook && \
 
 WORKDIR /opt/sp-notebook
 
-# Copy source without .git (saves ~200MB vs full clone)
-COPY --from=source --chown=notebook:notebook /src .
-# Overlay freshly built frontend assets
+COPY --from=patcher --chown=notebook:notebook /src .
 COPY --from=frontend-builder --chown=notebook:notebook /build/frontend/dist/ /opt/sp-notebook/signalpilot/_static/
 
-# Single consolidated pip install — avoids duplicate transitive deps across layers.
 RUN pip install --no-cache-dir \
     -e . \
     "starlette==1.0.0" \
@@ -86,7 +90,6 @@ RUN pip install --no-cache-dir \
     "jinja2==3.1.6" \
     "python-dotenv==1.2.2" \
     "requests==2.34.2" && \
-    # Pre-compile bytecode to speed up Python import time on container start.
     python -m compileall -q /opt/sp-notebook/signalpilot /usr/local/lib/python3.13/site-packages 2>/dev/null || true && \
     chown -R notebook:notebook /opt/sp-notebook
 
@@ -96,9 +99,13 @@ WORKDIR /workspace
 EXPOSE 2718
 
 HEALTHCHECK --interval=10s --timeout=5s --start-period=30s \
-    CMD curl -sf http://localhost:2718/api/health || curl -sf http://localhost:2718/ -o /dev/null || exit 1
+    CMD curl -sf http://localhost:2718/health || exit 1
 
+# Gateway URL and API key are injected by the orchestrator at pod creation.
+# SP_API_KEY authenticates notebook→gateway calls (project sync, clone URLs).
+# SP_LOG_LEVEL=10 enables DEBUG logging (default 30=WARNING).
 ENV SP_GATEWAY_URL=""
 ENV SP_API_KEY=""
+ENV SP_LOG_LEVEL="10"
 
-CMD ["sp", "edit", "--host", "0.0.0.0", "--port", "2718", "--headless", "/workspace"]
+CMD ["sp", "edit", "--host", "0.0.0.0", "--port", "2718", "--headless", "--no-token", "--no-skew-protection", "/workspace"]

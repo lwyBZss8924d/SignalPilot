@@ -52,15 +52,8 @@ class SessionConnector:
         self.websocket = websocket
 
     def connect(self) -> tuple[Session, ConnectionType]:
-        """Determine connection type and establish session connection.
-
-        Returns:
-            Tuple of (Session, ConnectionType) indicating the session
-            and how it was connected.
-
-        Raises:
-            WebSocketDisconnect: If the connection cannot be established.
-        """
+        """Determine connection type and establish session connection."""
+        print(f"[CONNECTOR] connect() called: file_key={self.params.file_key} session_id={self.params.session_id}", flush=True)
         # 1. Kiosk mode
         if self.params.kiosk:
             return self._connect_kiosk()
@@ -103,6 +96,7 @@ class SessionConnector:
             return self._resume_session(resumable)
 
         # 5. Create new session
+        print("[CONNECTOR] no existing session found, creating new", flush=True)
         return self._create_new_session()
 
     def _connect_kiosk(self) -> tuple[Session, ConnectionType]:
@@ -182,16 +176,11 @@ class SessionConnector:
         return self.manager.mode == SessionMode.RUN
 
     def _create_new_session(self) -> tuple[Session, ConnectionType]:
-        """Create a new session.
+        """Create a new session."""
+        print(f"[CONNECTOR] _create_new_session: file_key={self.params.file_key}", flush=True)
 
-        Grabs query params from the websocket and creates a new session
-        with the session manager.
-        """
-
-        # Note: if we resume a session, we don't pick up the new query
-        # params, and instead use the query params from when the
-        # session was created.
         query_params = self._extract_query_params()
+        print(f"[CONNECTOR] calling manager.create_session...", flush=True)
 
         new_session = self.manager.create_session(
             query_params=query_params.to_dict(),

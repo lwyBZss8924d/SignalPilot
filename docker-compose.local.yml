@@ -13,8 +13,10 @@ services:
       dockerfile: Dockerfile
     ports:
       - "127.0.0.1:2718:2718"
+    entrypoint: ["sh", "-c", "export SP_API_KEY=$(cat /shared/local_api_key 2>/dev/null || echo ''); exec python -m signalpilot edit --host 0.0.0.0 --port 2718 --headless --no-token --no-skew-protection --allow-origins http://localhost:3200,http://localhost:3300 /workspace"]
     environment:
       SP_LOG_DIR: /tmp/sp-logs
+      SP_LOG_LEVEL: "10"
       SP_GATEWAY_URL: http://gateway:3300
       SP_GATEWAY_INTERNAL_URL: http://gateway:3300
     volumes:

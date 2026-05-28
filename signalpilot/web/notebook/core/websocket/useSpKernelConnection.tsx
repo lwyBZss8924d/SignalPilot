@@ -14,6 +14,7 @@ import { Logger } from "@/utils/Logger";
 import { useAlertActions } from "../alerts/state";
 import { cacheInfoAtom } from "../cache/requests";
 import { useRunsActions } from "../cells/runs";
+import type { CellData } from "../cells/types";
 import { capabilitiesAtom } from "../config/capabilities";
 import { useSetAppConfig } from "../config/config";
 import { useDataSourceActions } from "../datasets/data-source-connections";
@@ -35,7 +36,6 @@ import {
   WebSocketClosedReason,
   WebSocketState,
 } from "./types";
-import type { CellData } from "../cells/types";
 import {
   classifyCloseEvent,
   TERMINAL_RETRYABLE_REASONS,
@@ -59,8 +59,8 @@ export function useSpKernelConnection(opts: {
   const { autoInstantiate, sessionId: _sessionId, setCells } = opts;
   const { showBoundary } = useErrorBoundary();
 
-  const { handleCellMessage } = useCellActions();
-  const actionsWithoutMiddleware = useCellActions({ skipMiddleware: true });
+  const cellActions = useCellActions();
+  const cellActionsNoMiddleware = useCellActions({ skipMiddleware: true });
   const { addCellNotification } = useRunsActions();
   const setKernelState = useSetAtom(kernelStateAtom);
   const setAppConfig = useSetAppConfig();
@@ -86,8 +86,8 @@ export function useSpKernelConnection(opts: {
   const actions: KernelMessageActions = {
     autoInstantiate,
     setCells,
-    handleCellMessage,
-    handleCellMessageWithoutMiddleware: actionsWithoutMiddleware.handleCellMessage,
+    handleCellMessage: cellActions.handleCellMessage,
+    cellActions: cellActionsNoMiddleware,
     addCellNotification,
     setKernelState,
     setAppConfig,
@@ -147,9 +147,14 @@ export function useSpKernelConnection(opts: {
   const ws = useConnectionTransport({
     static: isStaticNotebook() || isRawFallback,
 
-    url: async () => (await runtimeManager.getWsURL(getSessionId())).toString(),
+    url: async () => {
+      const url = (await runtimeManager.getWsURL(getSessionId())).toString();
+      console.log("[WS] connecting to:", url.slice(0, 120) + "...");
+      return url;
+    },
 
     onOpen: async () => {
+      console.log("[WS] OPEN");
       shouldTryReconnecting.current = true;
       retryCount.current = 0;
       setConnection({ state: WebSocketState.OPEN });
@@ -237,6 +242,7 @@ export function useSpKernelConnection(opts: {
   });
 
   const forceReconnect = () => {
+    console.log("[WS] forceReconnect called — closing + reconnecting in 500ms");
     shouldTryReconnecting.current = false;
     retryCount.current = 0;
     setConnection({ state: WebSocketState.CONNECTING });
@@ -244,6 +250,7 @@ export function useSpKernelConnection(opts: {
     setTimeout(() => {
       shouldTryReconnecting.current = true;
       regenerateSessionId();
+      console.log("[WS] forceReconnect: reconnecting now, new sessionId:", getSessionId());
       ws.reconnect();
     }, 500);
   };

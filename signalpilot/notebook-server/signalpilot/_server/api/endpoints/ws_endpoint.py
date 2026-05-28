@@ -79,17 +79,23 @@ async def websocket_endpoint(
         200:
             description: Websocket endpoint
     """
+    print(f"[WS] websocket_endpoint hit, query={websocket.query_params}", flush=True)
     app_state = AppState(websocket)
     validator = WebSocketConnectionValidator(websocket, app_state)
 
     # Validate authentication before proceeding
     if not await validator.validate_auth():
+        print("[WS] auth failed, closing", flush=True)
         return
 
     # Extract and validate connection parameters
+    print("[WS] auth passed, extracting params", flush=True)
     params = await validator.extract_connection_params()
     if params is None:
+        print("[WS] params extraction failed, closing", flush=True)
         return
+
+    print(f"[WS] params: session_id={params.session_id} file_key={params.file_key}", flush=True)
 
     # Start handler
     await WebSocketHandler(
@@ -388,18 +394,17 @@ class WebSocketHandler(SessionConsumer):
         # Create a new queue for this session
         self.message_queue = asyncio.Queue()
 
-        LOGGER.debug(
-            "Websocket open request for session with id %s",
-            self.params.session_id,
-        )
-        LOGGER.debug("Existing sessions: %s", self.manager.sessions)
+        print(f"[WS START] session_id={self.params.session_id} file_key={self.params.file_key}", flush=True)
+        print(f"[WS START] existing sessions: {list(self.manager.sessions.keys())}", flush=True)
 
         # Check if connection is allowed
         if not self._can_connect():
+            print("[WS START] connection refused — already connected", flush=True)
             await self._close_already_connected()
             return
 
         # Use SessionConnector to establish session connection
+        print("[WS START] creating SessionConnector, calling connect()...", flush=True)
         connector = SessionConnector(
             manager=self.manager,
             handler=self,
@@ -413,14 +418,25 @@ class WebSocketHandler(SessionConsumer):
             # requests behind it.
             session, connection_type = await asyncio.to_thread(connector.connect)
         except KernelStartupError as e:
-            LOGGER.error("Kernel startup failed: %s", e)
+            print(f"[WS START] KernelStartupError: {e}", flush=True)
             await self._close_kernel_startup_error(str(e))
             return
-        LOGGER.debug(
-            "Connected to session %s with type %s",
-            session.initialization_id,
-            connection_type,
-        )
+        except Exception as e:
+            print(f"[WS START] connect FAILED: {type(e).__name__}: {e}", flush=True)
+            import traceback
+            traceback.print_exc()
+            try:
+                await self.websocket.close(
+                    WebSocketCodes.NORMAL_CLOSE, "SP_SESSION_ERROR"
+                )
+            except Exception:
+                pass
+            return
+        print(f"[WS START] connected: type={connection_type}", flush=True)
+
+        # Retry extensions that failed during to_thread (they need the event loop)
+        if hasattr(session, "retry_deferred_extensions"):
+            session.retry_deferred_extensions()
 
         # Start message loops
         message_loop = WebSocketMessageLoop(

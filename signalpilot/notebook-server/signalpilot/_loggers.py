@@ -30,8 +30,9 @@ if TYPE_CHECKING:
 # own end).
 # See https://docs.python.org/3/howto/logging.html#configuring-logging-for-a-library
 
-# Global log level for loggers
-_LOG_LEVEL: int = logging.WARNING
+# Global log level for loggers — respect SP_LOG_LEVEL env var if set
+import os as _os
+_LOG_LEVEL: int = int(_os.getenv("SP_LOG_LEVEL", str(logging.WARNING)))
 
 # Custom log formatter
 _LOG_FORMATTER = LogFormatter()

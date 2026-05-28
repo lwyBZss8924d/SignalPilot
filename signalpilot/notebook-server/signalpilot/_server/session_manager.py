@@ -174,18 +174,21 @@ class SessionManager:
         auto_instantiate: bool,
     ) -> Session:
         """Create a new session."""
-        LOGGER.debug("Creating new session for id %s", session_id)
+        print(f"[SESSION MGR] create_session: id={session_id} file_key={file_key}", flush=True)
 
         # Check if session already exists
         existing = self._repository.get_sync(session_id)
         if existing:
+            print(f"[SESSION MGR] returning existing session", flush=True)
             return existing
 
         # Get app file manager
+        print(f"[SESSION MGR] loading workspace for file_key={file_key}", flush=True)
         defaults = AppDefaults.from_config_manager(self._config_manager)
         if self.mode is SessionMode.EDIT and not file_key.startswith(NEW_FILE):
             self.workspace.register_allowed_path(file_key)
         app_file_manager = self.workspace.load(file_key, defaults)
+        print(f"[SESSION MGR] loaded: path={app_file_manager.path} filename={app_file_manager.filename}", flush=True)
 
         # Create the session
         from signalpilot._runtime.commands import AppMetadata
@@ -200,6 +203,7 @@ class SessionManager:
                 )
             )
 
+        print(f"[SESSION MGR] calling SessionImpl.create (mode={self.mode})", flush=True)
         session = SessionImpl.create(
             initialization_id=file_key,
             session_consumer=session_consumer,

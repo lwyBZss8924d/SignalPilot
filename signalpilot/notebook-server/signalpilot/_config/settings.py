@@ -13,7 +13,7 @@ class GlobalSettings:
     CHECK_STATUS_UPDATE: bool = False
     TRACING: bool = os.getenv("SP_TRACING", "false") in ("true", "1")
     PROFILE_DIR: str | None = None
-    LOG_LEVEL: int = logging.WARNING
+    LOG_LEVEL: int = int(os.getenv("SP_LOG_LEVEL", str(logging.WARNING)))
     MANAGE_SCRIPT_METADATA: bool = os.getenv(
         "SP_MANAGE_SCRIPT_METADATA", "false"
     ) in ("true", "1")

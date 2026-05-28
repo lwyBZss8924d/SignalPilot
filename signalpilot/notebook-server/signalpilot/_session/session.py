@@ -45,10 +45,6 @@ from signalpilot._session.extensions.types import (
     SessionExtension,
 )
 from signalpilot._session.kernel_exit import classify_kernel_exit
-from signalpilot._session.managers import (
-    KernelManagerImpl,
-    QueueManagerImpl,
-)
 from signalpilot._session.model import ConnectionState, SessionMode
 from signalpilot._session.notebook import AppFileManager
 from signalpilot._session.room import Room
@@ -105,96 +101,30 @@ class SessionImpl(Session):
         """
         Create a new session.
         """
+        LOGGER.info("SessionImpl.create: mode=%s sandbox=%s app_host=%s", mode, sandbox_mode, app_host_context is not None)
         # Inherit config from the session manager
+        LOGGER.debug("Merging config overrides")
         # and override with any script-level config
         config_manager = config_manager.with_overrides(
             ScriptConfigManager(app_file_manager.path).get_config()
         )
 
+        LOGGER.debug("Config merged, extracting cell configs")
         configs = app_file_manager.app.cell_manager.config_map()
+        LOGGER.debug("Extracted %d cell configs", len(configs))
 
-        # Create kernel manager
-        # AppHost path handles multi-app run mode (both sandbox and non-sandbox).
-        # SandboxMode.MULTI falls through to IPC kernels only in edit mode.
-        queue_manager: QueueManager
-        kernel_manager: KernelManager
-        if app_host_context is not None and mode == SessionMode.RUN:
-            from signalpilot._session.managers.app_host import (
-                AppHostKernelManager,
-                AppHostQueueManager,
-            )
-
-            file_path = app_file_manager.path
-            if file_path is None:
-                raise ValueError(
-                    "App host isolation requires a file-backed notebook"
-                )
-            app_host = app_host_context.pool.get_or_create(file_path)
-            queue_manager = AppHostQueueManager(
-                app_host, app_host_context.session_id
-            )
-            kernel_manager = AppHostKernelManager(
-                app_host=app_host,
-                session_id=app_host_context.session_id,
-                queue_manager=queue_manager,
-                mode=mode,
-                configs=configs,
-                app_metadata=app_metadata,
-                config_manager=config_manager,
-                redirect_console_to_browser=redirect_console_to_browser,
-            )
-        elif sandbox_mode is SandboxMode.MULTI:
-            # IPC kernel path — edit mode with sandbox
-            # (AppHostPool is never created in edit mode)
-            from signalpilot._ipc import QueueManager as IPCQueueManager
-            from signalpilot._session.managers import (
-                IPCKernelManagerImpl,
-                IPCQueueManagerImpl,
-            )
-
-            ipc_queue_manager, connection_info = IPCQueueManager.create()
-            queue_manager = IPCQueueManagerImpl.from_ipc(ipc_queue_manager)
-            kernel_manager = IPCKernelManagerImpl(
-                queue_manager=queue_manager,
-                connection_info=connection_info,
-                mode=mode,
-                configs=configs,
-                app_metadata=app_metadata,
-                config_manager=config_manager,
-                redirect_console_to_browser=redirect_console_to_browser,
-            )
-        else:
-            # Original kernel: Process for edit, Thread for run
-            use_multiprocessing = mode == SessionMode.EDIT
-
-            # Try to grab a pre-warmed QueueManager from the pool
-            # (EDIT mode only); fall back to creating one on the spot.
-            queue_manager_from_pool = None
-            if use_multiprocessing:
-                from signalpilot._session.managers.kernel_pool import (
-                    get_default_pool,
-                )
-
-                pool = get_default_pool()
-                if pool is not None:
-                    queue_manager_from_pool = pool.acquire()
-
-            queue_manager = (
-                queue_manager_from_pool
-                if queue_manager_from_pool is not None
-                else QueueManagerImpl(
-                    use_multiprocessing=use_multiprocessing
-                )
-            )
-            kernel_manager = KernelManagerImpl(
-                queue_manager=queue_manager,
-                mode=mode,
-                configs=configs,
-                app_metadata=app_metadata,
-                config_manager=config_manager,
-                virtual_file_storage=virtual_file_storage,
-                redirect_console_to_browser=redirect_console_to_browser,
-            )
+        from signalpilot._session.managers.factory import create_kernel_and_queues
+        queue_manager, kernel_manager = create_kernel_and_queues(
+            mode=mode,
+            configs=configs,
+            app_metadata=app_metadata,
+            config_manager=config_manager,
+            virtual_file_storage=virtual_file_storage,
+            redirect_console_to_browser=redirect_console_to_browser,
+            sandbox_mode=sandbox_mode,
+            app_host_context=app_host_context,
+            app_file_manager=app_file_manager,
+        )
 
         if mode == SessionMode.EDIT:
             cache_enabled = not auto_instantiate
@@ -221,6 +151,7 @@ class SessionImpl(Session):
             SessionViewExtension(),
         ]
 
+        LOGGER.debug("Calling SessionImpl.__init__ (triggers start_kernel)")
         return cls(
             initialization_id=initialization_id,
             session_consumer=session_consumer,
@@ -258,7 +189,9 @@ class SessionImpl(Session):
         self.extensions.add(*extensions)
         self.scratchpad_lock = asyncio.Lock()
 
+        LOGGER.info("Starting kernel subprocess")
         self._kernel_manager.start_kernel()
+        LOGGER.info("Kernel subprocess started")
         self._event_bus = SessionEventBus()
 
         self._closed = False
@@ -283,17 +216,46 @@ class SessionImpl(Session):
         return self.app_file_manager.app.cell_manager.document
 
     def _attach_extensions(self) -> None:
-        """Attach all extensions to the session."""
+        """Attach all extensions to the session.
+
+        Extensions that fail (e.g. because they need an asyncio event loop
+        but we're in a worker thread) are tracked in ``_deferred_extensions``
+        so they can be retried via ``retry_deferred_extensions()`` once we're
+        back on the event loop.
+        """
+        self._deferred_extensions: list[SessionExtension] = []
         for extension in self.extensions:
             try:
                 extension.on_attach(self, self._event_bus)
             except Exception as e:
-                LOGGER.error(
-                    "Error attaching extension %s: %s",
-                    extension,
-                    e,
+                LOGGER.warning(
+                    "Deferring extension %s (will retry on event loop): %s",
+                    type(extension).__name__, e,
                 )
+                self._deferred_extensions.append(extension)
                 continue
+
+    def retry_deferred_extensions(self) -> None:
+        """Retry attaching extensions that failed during ``_attach_extensions``.
+
+        Call this from the asyncio event loop thread after ``to_thread``
+        returns, so event-loop-dependent extensions (file watcher, caching,
+        notification listener) can attach successfully.
+        """
+        if not hasattr(self, "_deferred_extensions") or not self._deferred_extensions:
+            return
+        deferred = self._deferred_extensions
+        self._deferred_extensions = []
+        for extension in deferred:
+            try:
+                print(f"[SESSION] retrying deferred extension: {type(extension).__name__}", flush=True)
+                extension.on_attach(self, self._event_bus)
+                print(f"[SESSION] {type(extension).__name__} attached OK", flush=True)
+            except Exception as e:
+                LOGGER.error(
+                    "Deferred extension %s still failed: %s",
+                    type(extension).__name__, e,
+                )
 
     def _detach_extensions(self) -> None:
         """Detach all extensions from the session."""

@@ -3667,6 +3667,7 @@ def _create_streams(
     # Returns None when the socket fails to connect; callers should bail out.
     pipe: TypedConnection[KernelMessage] | None = None
     if socket_addr is not None:
+        print(f"[KERNEL CHILD] connecting to parent socket {socket_addr}", flush=True)
         n_tries = 0
         last_error: BaseException | None = None
         while n_tries < 100:
@@ -3674,6 +3675,7 @@ def _create_streams(
                 pipe = TypedConnection[KernelMessage].of(
                     connection.Client(socket_addr)
                 )
+                print(f"[KERNEL CHILD] connected to parent on attempt {n_tries + 1}", flush=True)
                 break
             except Exception as e:
                 last_error = e
@@ -3791,9 +3793,14 @@ def launch_kernel(
         threaded_queue_reader,
     )
 
-    LOGGER.debug("Launching kernel")
+    import os as _os
+    print(
+        f"[KERNEL CHILD] launch_kernel entered (pid={_os.getpid()}, edit={is_edit_mode}, socket={socket_addr})",
+        flush=True,
+    )
     is_subprocess = is_edit_mode or is_ipc
     loop_factory = _bootstrap_subprocess(parent_pid, log_level, is_subprocess)
+    print("[KERNEL CHILD] bootstrap done, creating streams", flush=True)
 
     with _maybe_profile(profile_path):
         should_redirect_stdio = is_edit_mode or redirect_console_to_browser
@@ -3807,7 +3814,9 @@ def launch_kernel(
             use_fd_redirect,
         )
         if streams is None:
+            print("[KERNEL CHILD] _create_streams returned None — aborting", flush=True)
             return
+        print("[KERNEL CHILD] streams created, building kernel", flush=True)
 
         kernel, ctx = create_kernel(
             stream=streams.stream,
