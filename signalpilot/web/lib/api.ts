@@ -37,7 +37,7 @@ if (typeof window !== "undefined" && IS_CLOUD_MODE) {
 let _localKeyPromise: Promise<string | null> | null = null;
 
 function _fetchLocalKey(): Promise<string | null> {
-  if (typeof window === "undefined") return Promise.resolve(null);
+  if (typeof window === "undefined" || IS_CLOUD_MODE) return Promise.resolve(null);
   return fetch("/api/local-key")
     .then((r) => r.ok ? r.json() : null)
     .then((data: any) => {

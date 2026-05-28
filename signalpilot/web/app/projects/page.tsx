@@ -37,6 +37,7 @@ const NotebookBoot = dynamic(
 );
 
 const GATEWAY_URL = process.env.NEXT_PUBLIC_GATEWAY_URL ?? "http://localhost:3300";
+const IS_CLOUD_MODE = process.env.NEXT_PUBLIC_DEPLOYMENT_MODE === "cloud";
 
 type AppState = "loading" | "no-session" | "ready";
 
@@ -101,12 +102,14 @@ export default function ProjectsPage() {
 
     async function init() {
       let apiKey: string | undefined;
-      try {
-        const keyResp = await fetch("/api/local-key");
-        const keyData = (await keyResp.json()) as { key?: string };
-        if (keyData?.key) apiKey = keyData.key;
-      } catch (err) {
-        console.warn("Failed to fetch API key:", err);
+      if (!IS_CLOUD_MODE) {
+        try {
+          const keyResp = await fetch("/api/local-key");
+          const keyData = (await keyResp.json()) as { key?: string };
+          if (keyData?.key) apiKey = keyData.key;
+        } catch (err) {
+          console.warn("Failed to fetch API key:", err);
+        }
       }
 
       try {
@@ -168,7 +171,7 @@ export default function ProjectsPage() {
     setLaunchStatus("creating session...");
     try {
       let apiKey = existingApiKey;
-      if (!apiKey) {
+      if (!apiKey && !IS_CLOUD_MODE) {
         try {
           const keyResp = await fetch("/api/local-key");
           const keyData = (await keyResp.json()) as { key?: string };
