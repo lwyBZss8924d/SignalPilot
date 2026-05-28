@@ -482,16 +482,16 @@ export function registerReactComponent<T>(plugin: IPlugin<T, unknown>): void {
         return shouldCopyStyleSheet(sheet);
       });
       // Create new stylesheets if not already cached
+      let inlineIdx = 0;
       for (const sheet of sheets) {
         const sheetUniqueKey =
           sheet.href ??
           (sheet.ownerNode instanceof HTMLElement
             ? sheet.ownerNode.dataset.viteDevId
             : undefined) ??
-          sheet.title;
-        if (!sheetUniqueKey) {
-          continue;
-        }
+          sheet.title ??
+          `__inline_${inlineIdx++}`;
+        // sheetUniqueKey is always defined now (inline sheets get a synthetic key)
 
         if (!styleSheetCache.has(sheetUniqueKey)) {
           // We need to create a new stylesheet because we can't use the same
