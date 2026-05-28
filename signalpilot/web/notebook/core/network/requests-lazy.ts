@@ -60,7 +60,10 @@ const ACTIONS: Record<keyof AllRequests, Action> = {
 
   // Throw errors for operations that are not supported offline
   sendFormat: "throwError",
-  sendRestart: "throwError",
+  // sendRestart uses startConnection so it matches sendRun semantics: if the
+  // kernel is not running, Restart will spin it up rather than hanging silently.
+  // waitForConnectionOpen caused a silent dead-click before the first Run.
+  sendRestart: "startConnection",
 
   // These wait until the connection is open, but don't start a connection
   sendSave: "waitForConnectionOpen",
