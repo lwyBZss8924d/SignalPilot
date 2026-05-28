@@ -84,7 +84,7 @@ import { BranchStatus } from "../chrome/wrapper/footer-items/branch-status";
 import { useTreeDndManager } from "./dnd-wrapper";
 import { FileViewer } from "./file-viewer";
 import type { RequestingTree } from "./requesting-tree";
-import { openStateAtom, treeAtom } from "./state";
+import { fileTreeRefreshNonceAtom, openStateAtom, treeAtom } from "./state";
 import { PYTHON_CODE_FOR_FILE_TYPE } from "./types";
 import { useFileExplorerUpload } from "./upload";
 
@@ -112,6 +112,7 @@ export const FileExplorer: React.FC<{
   const [gitChangedFiles, setGitChangedFiles] = useState<Set<string>>(new Set());
   const [showHiddenFiles, setShowHiddenFiles] =
     useAtom<boolean>(hiddenFilesState);
+  const refreshNonce = useAtomValue(fileTreeRefreshNonceAtom);
 
   const { openPrompt } = useImperativeModal();
   // Keep external state to remember which folders are open
@@ -132,7 +133,7 @@ export const FileExplorer: React.FC<{
     if (Object.keys(validIds).length !== openIds.length) {
       setOpenState(validIds);
     }
-  }, [tree]);
+  }, [tree, refreshNonce]);
 
   // No FS event subscription: cross-process FS sync is unreliable and the wipe-on-event pattern caused user-visible bugs. Use the refresh button.
   const handleRefresh = useEvent(() => {

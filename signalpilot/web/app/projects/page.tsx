@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useRef } from "react";
+import { useEffect, useState, useRef, useCallback } from "react";
 import { useSearchParams } from "next/navigation";
 import dynamic from "next/dynamic";
 import {
@@ -23,6 +23,7 @@ import {
   NotebookProvider,
   type NotebookConfig,
 } from "~/components/notebook/notebook-context";
+import type { BootPhase } from "~/components/notebook/boot-runtime";
 
 const NotebookBoot = dynamic(
   () => import("~/components/notebook/notebook-boot"),
@@ -39,7 +40,14 @@ const NotebookBoot = dynamic(
 const GATEWAY_URL = process.env.NEXT_PUBLIC_GATEWAY_URL ?? "http://localhost:3300";
 const IS_CLOUD_MODE = process.env.NEXT_PUBLIC_DEPLOYMENT_MODE === "cloud";
 
-type AppState = "loading" | "no-session" | "ready";
+type AppState = "loading" | "no-session" | "booting" | "ready";
+
+const BOOT_PHASE_LABELS: Record<string, string> = {
+  health: "connecting to runtime...",
+  syncing: "syncing project files...",
+  sessions: "preparing workspace...",
+  ready: "running",
+};
 
 function IDEHeader({
   children,
@@ -76,7 +84,11 @@ export default function ProjectsPage() {
   const [launchStatus, setLaunchStatus] = useState(hasDeepLink ? "connecting to pod..." : "");
   const [notebookConfig, setNotebookConfig] = useState<NotebookConfig | null>(null);
   const [copied, setCopied] = useState(false);
+  const [bootPhase, setBootPhase] = useState<string>("health");
   const pingRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const handleBootPhase = useCallback((phase: string) => { setBootPhase(phase); }, []);
+  const handleBootReady = useCallback(() => { setState("ready"); }, []);
 
   function extractToken(notebookUrl: string): string | null {
     const match = notebookUrl.match(/[?&]token=([^&]+)/);
@@ -125,7 +137,7 @@ export default function ProjectsPage() {
             const config = buildConfig(session.id, session.notebook_url, apiKey);
             if (config) {
               setNotebookConfig(config);
-              setState("ready");
+              setState("booting");
               startPing();
               return;
             }
@@ -150,7 +162,7 @@ export default function ProjectsPage() {
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
-    if (notebookConfig && state === "ready") {
+    if (notebookConfig && (state === "ready" || state === "booting")) {
       const newProject = urlProject || undefined;
       const newBranch = urlBranch || undefined;
       const newFile = urlFile || undefined;
@@ -202,7 +214,7 @@ export default function ProjectsPage() {
       }
 
       setNotebookConfig(config);
-      setState("ready");
+      setState("booting");
       startPing();
     } catch (e) {
       toast(String(e), "error");
@@ -258,8 +270,8 @@ export default function ProjectsPage() {
     );
   }
 
-  // ─── Render: Ready ────────────────────────────────────────────
-  if (state === "ready" && notebookConfig) {
+  // ─── Render: Booting / Ready ──────────────────────────────────
+  if ((state === "booting" || state === "ready") && notebookConfig) {
     return (
       <div className="flex flex-col h-screen">
         <IDEHeader
@@ -289,12 +301,23 @@ export default function ProjectsPage() {
             </>
           }
         >
-          <StatusDot status="healthy" size={4} pulse />
-          <span className="text-[11px] text-[var(--color-success)]">running</span>
+          {state === "booting" ? (
+            <>
+              <Loader2 className="w-3.5 h-3.5 animate-spin text-[var(--color-text-dim)]" />
+              <span className="text-[11px] text-[var(--color-text-dim)]">
+                {BOOT_PHASE_LABELS[bootPhase] || bootPhase}
+              </span>
+            </>
+          ) : (
+            <>
+              <StatusDot status="healthy" size={4} pulse />
+              <span className="text-[11px] text-[var(--color-success)]">running</span>
+            </>
+          )}
         </IDEHeader>
         <div className="flex-1 min-h-0 overflow-hidden">
           <NotebookProvider value={notebookConfig}>
-            <NotebookBoot />
+            <NotebookBoot onPhaseChange={handleBootPhase} onReady={handleBootReady} />
           </NotebookProvider>
         </div>
       </div>

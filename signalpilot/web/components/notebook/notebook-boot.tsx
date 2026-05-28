@@ -28,8 +28,12 @@ function LoadingSpinner({ phase }: { phase: BootPhase }) {
 
 export default function NotebookBoot({
   children,
+  onPhaseChange,
+  onReady,
 }: {
   children?: React.ReactNode;
+  onPhaseChange?: (phase: string) => void;
+  onReady?: () => void;
 }) {
   const config = useNotebookConfig();
   const router = useRouter();
@@ -37,6 +41,11 @@ export default function NotebookBoot({
   const [error, setError] = useState<string | null>(null);
   const clientRef = useRef<SignalpilotClient | null>(null);
   const [ready, setReady] = useState(false);
+
+  const handlePhase = useCallback((p: BootPhase) => {
+    setPhase(p);
+    onPhaseChange?.(p);
+  }, [onPhaseChange]);
 
   const hostNavigate = useCallback((href: string) => {
     try {
@@ -58,10 +67,15 @@ export default function NotebookBoot({
   useEffect(() => {
     const controller = new AbortController();
 
-    bootRuntime(config, setPhase, hostNavigate, controller.signal)
-      .then((result) => {
+    bootRuntime(config, handlePhase, hostNavigate, controller.signal)
+      .then(async (result) => {
         clientRef.current = result.client;
+        if (result.syncResult?.localDir) {
+          const { dbtProjectDirAtom } = await import("@/components/editor/dbt/use-dbt");
+          result.client.store.set(dbtProjectDirAtom, result.syncResult.localDir);
+        }
         setReady(true);
+        onReady?.();
       })
       .catch((err) => {
         if (!controller.signal.aborted) {
@@ -77,7 +91,7 @@ export default function NotebookBoot({
       }
       setReady(false);
     };
-  }, [config.sessionId, config.token, config.gatewayUrl, config.project, config.branch, hostNavigate]);
+  }, [config.sessionId, config.token, config.gatewayUrl, config.project, config.branch, hostNavigate, handlePhase, onReady]);
 
   if (error) {
     return (

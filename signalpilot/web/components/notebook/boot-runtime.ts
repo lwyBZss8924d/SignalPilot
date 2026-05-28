@@ -9,6 +9,7 @@ export type BootPhase = "health" | "syncing" | "sessions" | "ready";
 
 export interface BootResult {
   client: SignalpilotClient;
+  syncResult?: { localDir: string; fileCount: number };
 }
 
 /**
@@ -49,10 +50,11 @@ export async function bootRuntime(
   if (!healthy) throw new Error("Runtime did not become healthy after 15 seconds");
 
   // ── Phase 2: Sync project files (non-fatal) ───────────────────
+  let syncResult: { localDir: string; fileCount: number } | undefined;
   if (config.project) {
     onPhase("syncing");
     try {
-      await fetch(`${runtimeUrl}/api/project/sync-down`, {
+      const resp = await fetch(`${runtimeUrl}/api/project/sync-down`, {
         method: "POST",
         headers: {
           ...headers,
@@ -61,6 +63,12 @@ export async function bootRuntime(
         },
         signal,
       });
+      if (resp.ok) {
+        const data = (await resp.json()) as { local_dir?: string; file_count?: number };
+        if (data.local_dir) {
+          syncResult = { localDir: data.local_dir, fileCount: data.file_count ?? 0 };
+        }
+      }
     } catch (err) {
       if (!signal.aborted) Logger.warn("Project sync failed (non-fatal):", err);
     }
@@ -111,5 +119,5 @@ export async function bootRuntime(
   });
 
   onPhase("ready");
-  return { client };
+  return { client, syncResult };
 }

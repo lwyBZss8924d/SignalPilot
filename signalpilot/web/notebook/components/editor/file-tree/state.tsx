@@ -50,6 +50,8 @@ export const treeAtom = atom<RequestingTree>((get) => {
   );
 });
 
+export const fileTreeRefreshNonceAtom = atom(0);
+
 export const openStateAtom = atomWithStorage<Record<string, boolean>>(
   "sp:file-tree-open-state",
   {},

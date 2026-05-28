@@ -15,6 +15,7 @@ import { SPA_NAVIGATE_EVENT } from "./router/spa-navigate";
 import { activeTabIdAtom, openFileInTab, openTabsAtom, useActiveTab } from "./file-tabs";
 import { isSwitchingNotebookAtom } from "./notebook-switcher";
 import { dbtProjectDirAtom, dbtProjectInfoAtom } from "@/components/editor/dbt/use-dbt";
+import { fileTreeRefreshNonceAtom } from "@/components/editor/file-tree/state";
 import type { DbtProjectInfo } from "@/components/editor/dbt/types";
 import { gatewayBranchIdAtom } from "@/core/branch/branch-state";
 import { getGatewayBranchId, getGatewayProjectId, setGatewayBranchId, setGatewayProjectId } from "./network/api";
@@ -170,6 +171,7 @@ export const EditApp: React.FC<AppProps> = ({
           if (result.local_dir) {
             console.log(`[Sync] Synced ${result.file_count} files to ${result.local_dir}`);
             store.set(dbtProjectDirAtom, result.local_dir);
+            store.set(fileTreeRefreshNonceAtom, (n: number) => n + 1);
 
             // Pre-detect dbt project so the panel is ready when opened.
             // Uses apiCall() which only needs the runtime health check — no kernel.
