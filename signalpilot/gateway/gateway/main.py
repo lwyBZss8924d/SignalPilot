@@ -150,6 +150,29 @@ async def lifespan(app: FastAPI):
     if is_cloud_mode():
         logger.info("STARTUP: Cloud mode — sandbox, file browser, dbt projects disabled")
 
+    # Clean up stale notebook sessions on startup.
+    # After a deploy/restart, pods from the previous run may be gone but
+    # sessions still show "running" in the DB. Mark them stopped so users
+    # get a fresh pod on next connect instead of 502s or SP_ALREADY_CONNECTED loops.
+    try:
+        from .store.notebook_sessions import list_stale_sessions, mark_stopped
+        from .orchestrator.kubernetes import KubernetesOrchestrator
+        orch = KubernetesOrchestrator()
+        factory = get_session_factory()
+        async with factory() as db_session:
+            stale = await list_stale_sessions(db_session, max_idle_seconds=0)
+            for s in stale:
+                try:
+                    alive = await orch.is_pod_alive(s.pod_name, org_id=s.org_id or "")
+                except Exception:
+                    alive = False
+                if not alive:
+                    await mark_stopped(db_session, session_id=s.id)
+                    logger.info("STARTUP: cleaned stale session %s (pod %s dead)", s.id, s.pod_name)
+            await db_session.commit()
+    except Exception as e:
+        logger.warning("STARTUP: stale session cleanup failed: %s", e)
+
     async def _health_flush_loop():
         """Flush buffered health events to DB every 5 seconds."""
         while True:
