@@ -20,7 +20,7 @@ async def run_notebook(
     """Run a .py notebook in a cloud K8s pod.
 
     Creates an agent branch on first call (pass back agent_branch on subsequent calls).
-    Writes the notebook file to the branch in S3, injects it into the pod, and
+    Writes the notebook file to the branch in git, injects it into the pod, and
     executes it with `sp export session`. Returns stdout/stderr and a URL to view
     the notebook in the browser.
 
