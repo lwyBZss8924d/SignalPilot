@@ -88,3 +88,31 @@ def purge_persisted_auth(repo: Path) -> None:
         )
     except _PURGE_SWALLOWED_ERRORS:
         pass
+
+
+def _main() -> int:
+    """CLI: `python -m signalpilot._server.files.git_auth <repo> <project_id> <git-args...>`.
+
+    Runs an authed git invocation (auth header per-process, never persisted).
+    Used by the gateway's run_notebook push-back so it doesn't rely on a
+    credential persisted in .git/config (removed by F-9).
+    """
+    import sys
+
+    if len(sys.argv) < 4:
+        sys.stderr.write("usage: git_auth <repo> <project_id> <git-args...>\n")
+        return 2
+    repo = Path(sys.argv[1])
+    project_id = sys.argv[2]
+    rc, out, err = run_git_authed(repo, project_id, *sys.argv[3:])
+    if out:
+        sys.stdout.write(out)
+    if err:
+        sys.stderr.write(err)
+    return rc
+
+
+if __name__ == "__main__":
+    import sys
+
+    sys.exit(_main())

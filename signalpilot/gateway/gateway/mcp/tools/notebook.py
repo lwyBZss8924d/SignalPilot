@@ -193,10 +193,13 @@ async def run_notebook(
     # 8. Commit and push results back via git (from project dir)
     push_result = ""
     try:
+        # Push via the notebook-server's authed git runner — the auth header is
+        # passed per-invocation (F-9); a bare `git push` would fail now that the
+        # credential is no longer persisted in .git/config.
         git_cmds = [
             f"cd {project_dir} && git add -A",
             f"cd {project_dir} && git commit -m 'agent: {filename}'",
-            f"cd {project_dir} && git push origin HEAD:refs/heads/{agent_branch}",
+            f"cd {project_dir} && python -m signalpilot._server.files.git_auth . {project_id} push origin HEAD:refs/heads/{agent_branch}",
         ]
         for cmd in git_cmds:
             g_out, g_err, g_rc = await orch.exec_in_pod(
