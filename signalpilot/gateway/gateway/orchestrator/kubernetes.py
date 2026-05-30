@@ -187,7 +187,11 @@ def _pod_manifest(
             "volumes": [
                 {"name": "tmp", "emptyDir": {}},
                 {"name": "home", "emptyDir": {}},
-                {"name": "workspace", "emptyDir": {}},
+                *(
+                    [{"name": "workspace", "persistentVolumeClaim": {"claimName": os.getenv("SP_NOTEBOOK_PVC", "notebooks-pvc")}}]
+                    if os.getenv("SP_NOTEBOOK_PVC")
+                    else [{"name": "workspace", "emptyDir": {}}]
+                ),
             ],
             "restartPolicy": "Never",
             "terminationGracePeriodSeconds": 5,
