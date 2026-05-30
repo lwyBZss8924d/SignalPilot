@@ -212,6 +212,11 @@ async def sync_project_with_github(project_id: str, org_id: str) -> dict:
         # Fetch any new remote branches
         fetch_result = fetch_all(project_id, remote_url)
 
+        # Mirror fetched remote-tracking refs into local heads so the bare repo
+        # (which serves refs/heads/* to the notebook pod) reflects GitHub state.
+        from .repos import materialize_local_branches
+        materialize_local_branches(project_id, link.default_branch or "main")
+
         # Update last_sync_at
         from sqlalchemy import update
         from ..db.models import GatewayGitHubRepoLink

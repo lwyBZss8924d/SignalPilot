@@ -246,9 +246,13 @@ async def create_repo_link(body: GitHubRepoLinkCreate, store: StoreD):
     token = await gh_store.get_valid_token(store.session, installation)
     remote_url = f"https://x-access-token:{token}@github.com/{body.repo_full_name}.git"
 
-    from ..git.repos import clone_from_remote, repo_exists
+    from ..git.repos import clone_from_remote, materialize_local_branches, repo_exists
     try:
         clone_from_remote(body.project_id, remote_url)
+        # The bare repo is usually pre-created at project creation, so the line
+        # above does a `git fetch` that only populates refs/remotes/github/*.
+        # Materialize local refs/heads/* (+ HEAD) so the pod's clone sees files.
+        materialize_local_branches(body.project_id, body.default_branch or "main")
         logger.info("Cloned GitHub repo %s into bare repo for project %s", body.repo_full_name, body.project_id)
     except Exception as e:
         logger.error("GitHub clone failed for %s: %s", body.repo_full_name, e)

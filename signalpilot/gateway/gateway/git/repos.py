@@ -99,6 +99,41 @@ def list_branches(project_id: str) -> list[str]:
     return branches
 
 
+def materialize_local_branches(project_id: str, default_branch: str = "main") -> None:
+    """Create local refs/heads/* from fetched refs/remotes/github/* and point
+    HEAD at the default branch.
+
+    A bare repo serves refs/heads/* to clients (the notebook pod clones these).
+    But when the bare repo already exists (pre-created at project creation), the
+    GitHub link does `git fetch` which only populates refs/remotes/github/* —
+    leaving refs/heads/* empty, so the served repo looks empty (0 files). This
+    mirrors the fetched remote-tracking refs into local heads.
+    """
+    path = repo_path(project_id)
+    if not path.exists():
+        return
+
+    rc, out, _ = _run_git(
+        "for-each-ref", "--format=%(refname)", "refs/remotes/github/", cwd=path
+    )
+    if rc != 0:
+        return
+
+    for ref in out.strip().splitlines():
+        ref = ref.strip()
+        if not ref:
+            continue
+        branch = ref.removeprefix("refs/remotes/github/")
+        if not branch or branch == "HEAD":
+            continue
+        _run_git("update-ref", f"refs/heads/{branch}", ref, cwd=path)
+
+    # Point HEAD at the default branch if it now exists.
+    rc, _, _ = _run_git("rev-parse", "--verify", f"refs/heads/{default_branch}", cwd=path)
+    if rc == 0:
+        _run_git("symbolic-ref", "HEAD", f"refs/heads/{default_branch}", cwd=path)
+
+
 def get_head_ref(project_id: str) -> str | None:
     path = repo_path(project_id)
     if not path.exists():
