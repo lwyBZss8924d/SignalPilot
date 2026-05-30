@@ -4,7 +4,7 @@ import { usePathname } from "next/navigation";
 import type { ReactNode } from "react";
 
 /** Routes where the sidebar is hidden — main content should be full-width. */
-const FULL_WIDTH_PREFIXES = ["/sign-in", "/sign-up", "/onboarding"];
+const FULL_WIDTH_PREFIXES = ["/sign-in", "/sign-up", "/onboarding", "/notebook"];
 
 export function MainContent({ children }: { children: ReactNode }) {
   const pathname = usePathname();

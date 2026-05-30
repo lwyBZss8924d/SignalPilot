@@ -144,7 +144,7 @@ const nav: { href: string; label: string; icon: NavIconComponent; shortcut: stri
 ];
 
 /** Routes where the sidebar should be hidden (auth + onboarding = locked flow) */
-const HIDDEN_SIDEBAR_PREFIXES = ["/sign-in", "/sign-up", "/onboarding"];
+const HIDDEN_SIDEBAR_PREFIXES = ["/sign-in", "/sign-up", "/onboarding", "/notebook"];
 
 function SignalPilotLogo() {
   return (

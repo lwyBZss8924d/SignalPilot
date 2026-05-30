@@ -338,7 +338,14 @@ export default function ProjectsPage() {
                 {copied ? "copied" : "share"}
               </button>
               <a
-                href={`${GATEWAY_URL}/notebook/${notebookConfig.sessionId}/`}
+                href={`/notebook${(() => {
+                  const p = new URLSearchParams();
+                  if (urlProject) p.set("project", urlProject);
+                  if (urlBranch) p.set("branch", urlBranch);
+                  if (urlFile) p.set("file", urlFile);
+                  const qs = p.toString();
+                  return qs ? `?${qs}` : "";
+                })()}`}
                 target="_blank"
                 rel="noopener noreferrer"
                 className="flex items-center gap-1.5 px-3 py-1.5 text-[11px] text-[var(--color-text-dim)] border border-[var(--color-border)] hover:border-[var(--color-text-dim)] hover:text-[var(--color-text)] transition-all tracking-wider uppercase"
@@ -395,18 +402,15 @@ export default function ProjectsPage() {
             <Code className="w-4 h-4" />
             <span>open IDE</span>
           </button>
-          <button
-            onClick={async () => {
-              try {
-                const session = await createNotebookSession({ project_id: "", branch: "main" });
-                if (session.notebook_url) window.open(`${GATEWAY_URL}${session.notebook_url}`, "_blank");
-              } catch (e) { toast(String(e), "error"); }
-            }}
+          <a
+            href="/notebook"
+            target="_blank"
+            rel="noopener noreferrer"
             className="w-full flex items-center gap-3 px-5 py-4 text-xs text-[var(--color-text-dim)] border border-[var(--color-border)] hover:border-[var(--color-text-dim)] hover:text-[var(--color-text)] transition-all tracking-wider uppercase"
           >
             <ExternalLink className="w-4 h-4" />
             <span>open in new tab</span>
-          </button>
+          </a>
         </div>
       </div>
     </div>
