@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState, useRef, useCallback } from "react";
-import { useSearchParams } from "next/navigation";
+import { useSearchParams, usePathname } from "next/navigation";
 import dynamic from "next/dynamic";
 import {
   Loader2,
@@ -76,6 +76,9 @@ function IDEHeader({
 export default function ProjectsPage() {
   const { toast } = useToast();
   const searchParams = useSearchParams();
+  const pathname = usePathname();
+  // On the full-page /notebook view we're already "external" — hide the pop-out button.
+  const isExternalView = pathname?.startsWith("/notebook") ?? false;
   const { planTier, isLoaded: subLoaded } = useSubscription();
 
   // Projects is a paid feature. Local mode reports "team" so it's never gated.
@@ -337,21 +340,23 @@ export default function ProjectsPage() {
                 {copied ? <Check className="w-3 h-3" /> : <Share2 className="w-3 h-3" />}
                 {copied ? "copied" : "share"}
               </button>
-              <a
-                href={`/notebook${(() => {
-                  const p = new URLSearchParams();
-                  if (urlProject) p.set("project", urlProject);
-                  if (urlBranch) p.set("branch", urlBranch);
-                  if (urlFile) p.set("file", urlFile);
-                  const qs = p.toString();
-                  return qs ? `?${qs}` : "";
-                })()}`}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="flex items-center gap-1.5 px-3 py-1.5 text-[11px] text-[var(--color-text-dim)] border border-[var(--color-border)] hover:border-[var(--color-text-dim)] hover:text-[var(--color-text)] transition-all tracking-wider uppercase"
-              >
-                <ExternalLink className="w-3 h-3" /> external
-              </a>
+              {!isExternalView && (
+                <a
+                  href={`/notebook${(() => {
+                    const p = new URLSearchParams();
+                    if (urlProject) p.set("project", urlProject);
+                    if (urlBranch) p.set("branch", urlBranch);
+                    if (urlFile) p.set("file", urlFile);
+                    const qs = p.toString();
+                    return qs ? `?${qs}` : "";
+                  })()}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="flex items-center gap-1.5 px-3 py-1.5 text-[11px] text-[var(--color-text-dim)] border border-[var(--color-border)] hover:border-[var(--color-text-dim)] hover:text-[var(--color-text)] transition-all tracking-wider uppercase"
+                >
+                  <ExternalLink className="w-3 h-3" /> external
+                </a>
+              )}
               <button
                 onClick={stop}
                 className="flex items-center gap-1.5 px-3 py-1.5 text-[11px] text-[var(--color-text-dim)] border border-[var(--color-border)] hover:border-[var(--color-error)] hover:text-[var(--color-error)] transition-all tracking-wider uppercase"
