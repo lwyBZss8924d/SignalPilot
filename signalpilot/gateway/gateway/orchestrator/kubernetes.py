@@ -29,6 +29,13 @@ if _UPSTREAM_MODE not in {"pod_ip", "nodeport", "direct"}:
         "Allowed values: 'pod_ip', 'nodeport', 'direct'."
     )
 
+# Sandbox runtime + scheduling for notebook pods. On EKS we run them under gVisor
+# (runsc) on a dedicated tainted/labeled node group; emit runtimeClassName only
+# when set so non-gVisor clusters (local/dev) still work. Empty disables it.
+_NOTEBOOK_RUNTIME_CLASS = os.getenv("SP_NOTEBOOK_RUNTIME_CLASS", "").strip()
+_NOTEBOOK_NODE_LABEL_KEY = os.getenv("SP_NOTEBOOK_NODE_LABEL_KEY", "signalpilot.ai/notebook").strip()
+_NOTEBOOK_NODE_LABEL_VALUE = os.getenv("SP_NOTEBOOK_NODE_LABEL_VALUE", "true").strip()
+
 
 def _parse_single_kv(selector_str: str) -> dict[str, str]:
     """Parse a single k=v selector string into a dict. Raises on violation."""
@@ -119,6 +126,25 @@ def _pod_manifest(
             },
         },
         "spec": {
+            # Run under the sandbox runtime (gVisor/runsc) and pin to the dedicated
+            # notebook node group when configured. runtimeClassName is omitted when
+            # SP_NOTEBOOK_RUNTIME_CLASS is empty (local/dev clusters without gVisor).
+            **({"runtimeClassName": _NOTEBOOK_RUNTIME_CLASS} if _NOTEBOOK_RUNTIME_CLASS else {}),
+            **(
+                {
+                    "nodeSelector": {_NOTEBOOK_NODE_LABEL_KEY: _NOTEBOOK_NODE_LABEL_VALUE},
+                    "tolerations": [
+                        {
+                            "key": _NOTEBOOK_NODE_LABEL_KEY,
+                            "operator": "Equal",
+                            "value": _NOTEBOOK_NODE_LABEL_VALUE,
+                            "effect": "NoSchedule",
+                        }
+                    ],
+                }
+                if _NOTEBOOK_RUNTIME_CLASS
+                else {}
+            ),
             # Pods must not mount the SA token — no K8s API access from within notebook pods.
             "automountServiceAccountToken": False,
             # Suppress per-Service env var injection (SVC_SERVICE_HOST, SVC_PORT, etc.).
