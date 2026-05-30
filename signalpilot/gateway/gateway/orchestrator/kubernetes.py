@@ -139,7 +139,10 @@ def _pod_manifest(
                         if ":" in image and "/" not in image
                         else image
                     ),
-                    "imagePullPolicy": "IfNotPresent",
+                    # Always pull: the image uses a mutable :latest tag, so
+                    # IfNotPresent would serve a stale image on nodes that cached
+                    # an older :latest. In-region ECR pulls are fast.
+                    "imagePullPolicy": "Always",
                     # Pod entrypoint: runs project_sync_boot to git-clone /workspace,
                     # then execs sp edit. wait_for_ready's TCP probe on :2718 already
                     # gates correctly — clone failure → entrypoint exits non-zero →
