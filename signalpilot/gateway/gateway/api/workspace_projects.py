@@ -96,7 +96,16 @@ async def get_clone_url(project_id: str, store: StoreD, request: Request):
     k8s = get_k8s_settings()
     configured = (k8s.sp_public_gateway_url or "").rstrip("/")
     if is_cloud_mode():
-        base_url = f"{configured}/git/{project_id}.git"
+        # The ONLY consumers of clone_url are in-pod (project_sync sync_down and
+        # git_auth push). Prefer the internal gateway URL the pod already reaches
+        # for API calls (SP_GATEWAY_INTERNAL_URL, e.g. http://<vpc-ip>:3300) over
+        # the public TLS domain: under `--network host` the gateway binds only
+        # :3300 (non-root, can't bind :443), so the public :443 git path is
+        # unreachable from pods. This is a server-configured value, not the
+        # inbound Host header, so the R11-S-1 anti-spoofing property holds.
+        internal = (os.getenv("SP_GATEWAY_INTERNAL_URL", "") or "").rstrip("/")
+        clone_base = internal or configured
+        base_url = f"{clone_base}/git/{project_id}.git"
     elif configured and configured != _LOCAL_GATEWAY_URL_DEFAULT:
         base_url = f"{configured}/git/{project_id}.git"
     else:
