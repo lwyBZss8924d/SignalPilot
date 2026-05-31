@@ -29,6 +29,9 @@ def run_git(repo: Path, *args: str, timeout: int = 60) -> tuple[int, str, str]:
         cwd=str(repo),
         capture_output=True,
         text=True,
+        # Detach git from any inherited stdin (e.g. the kubectl-exec WS channel) so
+        # a credential prompt fails fast instead of blocking until the exec times out.
+        stdin=subprocess.DEVNULL,
         timeout=timeout,
     )
     return result.returncode, result.stdout, result.stderr
@@ -60,6 +63,9 @@ def run_git_authed(
         cwd=str(repo),
         capture_output=True,
         text=True,
+        # Detach git from any inherited stdin (the exec WS channel we read the JWT
+        # from) so it never blocks waiting on stdin.
+        stdin=subprocess.DEVNULL,
         timeout=timeout,
     )
     return result.returncode, result.stdout, result.stderr
@@ -113,8 +119,11 @@ def _main() -> int:
     # Prime the JWT from stdin if the environment does not carry it (F-6).
     # load_session_jwt() (called inside run_git_authed) pops SP_SESSION_JWT from
     # os.environ, so setting it here makes the authed header resolve correctly.
+    # Use readline(), not read(): the gateway terminates the JWT with a newline, so
+    # readline returns at the delimiter without waiting for stdin EOF (the k8s exec
+    # stdin channel does not deliver a reliable EOF, so read() would block/time out).
     if not os.environ.get("SP_SESSION_JWT") and not sys.stdin.isatty():
-        piped = sys.stdin.read().strip()
+        piped = sys.stdin.readline().strip()
         if piped:
             os.environ["SP_SESSION_JWT"] = piped
 

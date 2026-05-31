@@ -274,7 +274,9 @@ async def run_notebook(
             (["git", "-C", project_dir, "commit", "-m", f"agent: {filename}"], None),
             (["python", "-m", "signalpilot._server.files.git_auth", project_dir,
               project_id, "push", "origin", f"HEAD:refs/heads/{agent_branch}"],
-             push_jwt.encode("utf-8")),
+             # Trailing newline so git_auth's readline() returns without needing a
+             # stdin EOF (the k8s exec stdin channel doesn't deliver one).
+             (push_jwt + "\n").encode("utf-8")),
         ]
         for git_argv, git_stdin in git_steps:
             g_out, g_err, g_rc = await orch.exec_in_pod(
