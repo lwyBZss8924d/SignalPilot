@@ -1,3 +1,4 @@
+import type { AuthTokenProvider } from "@/core/runtime/types";
 import type { SignalpilotClient, SignalpilotMountConfig } from "./types";
 
 /**
@@ -39,7 +40,7 @@ export function adaptMountConfig(source: {
 function buildRuntimeConfig(
   config: SignalpilotMountConfig,
   client: SignalpilotClient,
-): Array<{ url: string; authToken?: string; lazy?: boolean }> {
+): Array<{ url: string; authToken?: AuthTokenProvider; lazy?: boolean }> {
   // Props-level runtimeConfig takes precedence over client-level.
   if (config.runtimeConfig && config.runtimeConfig.length > 0) {
     return config.runtimeConfig;

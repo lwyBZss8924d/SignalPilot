@@ -16,7 +16,7 @@ import {
   getNotebookSession,
   deleteNotebookSession,
   pingNotebookSession,
-  requestNotebookHandshake,
+  getGatewayAuthToken,
 } from "~/lib/api";
 import { StatusDot } from "~/components/ui/data-viz";
 import { useToast } from "~/components/ui/toast";
@@ -103,19 +103,13 @@ export default function ProjectsPage() {
   const handleBootPhase = useCallback((phase: string) => { setBootPhase(phase); }, []);
   const handleBootReady = useCallback(() => { setState("ready"); }, []);
 
-  function extractToken(notebookUrl: string): string | null {
-    const match = notebookUrl.match(/[?&]token=([^&]+)/);
-    return match ? match[1] : null;
-  }
-
-  function buildConfig(sessionId: string, notebookUrl: string, apiKey?: string): NotebookConfig | null {
-    const token = extractToken(notebookUrl);
-    if (!token) return null;
+  function buildConfig(sessionId: string): NotebookConfig {
+    // The notebook proxy authenticates the caller's Clerk JWT directly (cloud)
+    // or runs without auth (local). No per-session token / cookie / handshake.
     return {
       gatewayUrl: GATEWAY_URL,
       sessionId,
-      token,
-      apiKey,
+      getToken: getGatewayAuthToken,
       project: urlProject || undefined,
       branch: urlBranch || undefined,
       file: urlFile || undefined,
@@ -139,17 +133,6 @@ export default function ProjectsPage() {
     setState((s) => (s === "booting" || s === "ready" ? s : "loading"));
 
     async function init() {
-      let apiKey: string | undefined;
-      if (!IS_CLOUD_MODE) {
-        try {
-          const keyResp = await fetch("/api/local-key");
-          const keyData = (await keyResp.json()) as { key?: string };
-          if (keyData?.key) apiKey = keyData.key;
-        } catch (err) {
-          console.warn("Failed to fetch API key:", err);
-        }
-      }
-
       try {
         const session = await getNotebookSession() as any;
         if (!cancelled && session?.status === "running" && session.id && session.notebook_url) {
@@ -160,20 +143,10 @@ export default function ProjectsPage() {
             console.log("[projects] Session project mismatch — deleting stale session");
             await deleteNotebookSession().catch(() => {});
           } else {
-            // F-16: the GET response now returns a tokenless URL (no ?token=).
-            // Mint a fresh single-use handshake token immediately before navigation.
-            let navigableUrl: string = session.notebook_url;
-            if (!extractToken(navigableUrl)) {
-              const handshake = await requestNotebookHandshake(session.id);
-              navigableUrl = handshake.url;
-            }
-            const config = buildConfig(session.id, navigableUrl, apiKey);
-            if (config) {
-              setNotebookConfig(config);
-              setState("booting");
-              startPing();
-              return;
-            }
+            setNotebookConfig(buildConfig(session.id));
+            setState("booting");
+            startPing();
+            return;
           }
         }
       } catch (err) {
@@ -181,7 +154,7 @@ export default function ProjectsPage() {
       }
 
       if (!cancelled && hasDeepLink) {
-        await launch(apiKey);
+        await launch();
       } else if (!cancelled) {
         setState("no-session");
       }
@@ -211,21 +184,10 @@ export default function ProjectsPage() {
     }
   }, [urlProject, urlBranch, urlFile, state]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  async function launch(existingApiKey?: string) {
+  async function launch() {
     setState("loading");
     setLaunchStatus("creating session...");
     try {
-      let apiKey = existingApiKey;
-      if (!apiKey && !IS_CLOUD_MODE) {
-        try {
-          const keyResp = await fetch("/api/local-key");
-          const keyData = (await keyResp.json()) as { key?: string };
-          if (keyData?.key) apiKey = keyData.key;
-        } catch (err) {
-          console.warn("Failed to fetch API key:", err);
-        }
-      }
-
       const session = await createNotebookSession({
         project_id: urlProject || "",
         branch: urlBranch || "main",
@@ -236,22 +198,8 @@ export default function ProjectsPage() {
         return;
       }
       setLaunchStatus("waiting for pod...");
-      const full = await getNotebookSession();
-      // F-16: the POST response (session.notebook_url) carries the minted
-      // handshake token; the re-GET (full.notebook_url) is now tokenless —
-      // prefer the POST URL, only using the GET URL if it carries a token.
-      const getUrl = full?.notebook_url ?? null;
-      const notebookUrl =
-        (getUrl && extractToken(getUrl) ? getUrl : null) ?? session.notebook_url ?? "";
 
-      const config = buildConfig(session.id, notebookUrl, apiKey);
-      if (!config) {
-        toast("No session token in notebook URL", "error");
-        setState("no-session");
-        return;
-      }
-
-      setNotebookConfig(config);
+      setNotebookConfig(buildConfig(session.id));
       setState("booting");
       startPing();
     } catch (e) {

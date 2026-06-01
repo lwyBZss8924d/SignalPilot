@@ -3,14 +3,10 @@
 from __future__ import annotations
 
 # Pattern for validating session_id path parameters.
-# Must match before session_id is interpolated into cookie names or Path= attributes.
-# All chars legal in a FastAPI path segment but illegal in cookie attribute values
-# (semicolon, comma, CR, LF, space) are excluded. UUIDs and opaque base64url IDs
-# all satisfy this pattern.
+# All chars legal in a FastAPI path segment but illegal in header/path attribute
+# values (semicolon, comma, CR, LF, space) are excluded. UUIDs and opaque
+# base64url IDs all satisfy this pattern.
 SESSION_ID_PATTERN_STR = r"^[A-Za-z0-9_-]{1,64}$"
-
-# Cookie name template — one cookie per session.
-COOKIE_NAME_PREFIX = "sp_nb_"
 
 # Internal port notebook pods listen on.
 POD_PORT = 2718
@@ -44,9 +40,10 @@ HOP_BY_HOP_HEADERS: frozenset[str] = frozenset(
 
 # Headers stripped from outbound (gateway → pod) requests.
 # In addition to HOP_BY_HOP_HEADERS, Cookie and Authorization are stripped:
-# - Cookie: the pod runs --no-token; forwarding Cookie would leak Clerk __session
-#   and the sp_nb_<id> proxy cookie into pod logs.
-# - Authorization: a Clerk bearer JWT must never reach the pod.
+# - Cookie: forwarding Cookie would leak the Clerk __session cookie into pod logs.
+# - Authorization: the caller's Clerk bearer JWT must never reach the pod
+#   (the pod runs --no-token; the gateway proxy is the sole auth gate).
+# - sec-websocket-protocol: carries our auth sentinel + JWT; must not reach the pod.
 # Host is also not forwarded (let httpx synthesize it from the URL).
 OUTBOUND_STRIP_HEADERS: frozenset[str] = HOP_BY_HOP_HEADERS | frozenset({
     "cookie", "authorization", "host",
@@ -55,7 +52,6 @@ OUTBOUND_STRIP_HEADERS: frozenset[str] = HOP_BY_HOP_HEADERS | frozenset({
 })
 
 # Headers stripped from upstream responses before returning to the browser.
-# Set-Cookie is stripped to prevent the notebook server's own session cookie from colliding
-# with the gateway origin. This is distinct from the proxy's own Set-Cookie on
-# _init/delete responses — the security-headers middleware MUST NOT strip those.
+# Set-Cookie is stripped to prevent the notebook server's own session cookie from
+# colliding with the gateway origin.
 INBOUND_STRIP_HEADERS: frozenset[str] = HOP_BY_HOP_HEADERS | frozenset({"set-cookie"})

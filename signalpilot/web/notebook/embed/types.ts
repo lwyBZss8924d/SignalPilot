@@ -1,4 +1,5 @@
 import type { JotaiStore } from "@/core/state/jotai";
+import type { AuthTokenProvider } from "@/core/runtime/types";
 import type { ClientRegistries } from "./client-binding";
 
 export type { JotaiStore };
@@ -16,7 +17,7 @@ export interface SignalpilotClientOptions {
   /**
    * Optional remote runtime; passed through to runtimeConfigAtom on mount.
    */
-  runtimeConfig?: { url: string; authToken?: string; lazy?: boolean; healthVerified?: boolean };
+  runtimeConfig?: { url: string; authToken?: AuthTokenProvider; lazy?: boolean; healthVerified?: boolean };
   /**
    * Sp-Server-Token header value.
    */
@@ -70,7 +71,7 @@ export interface SignalpilotMountConfig {
   configOverrides?: unknown;
   version?: string;
   serverToken?: string;
-  runtimeConfig?: Array<{ url: string; authToken?: string; lazy?: boolean }>;
+  runtimeConfig?: Array<{ url: string; authToken?: AuthTokenProvider; lazy?: boolean }>;
   gatewayUrl?: string;
   gatewayApiKey?: string;
 }

@@ -212,17 +212,12 @@ def _to_info(row: GatewayNotebookSession) -> NotebookSessionInfo:
     """FE-facing view of a session row.
 
     access_token is always None here — the secret never leaves the server.
-    notebook_url is the path-only proxy init URL (no token, no host, no port).
-    Two distinct read paths off the same row:
-    - _to_info()            -> NotebookSessionInfo  (FE-facing, access_token=None)
-    - get_session_internal() -> NotebookSessionInternal  (proxy-only, real token)
+    notebook_url is the path-only proxy URL (no token, no host, no port); the
+    browser authenticates to the proxy with its Clerk JWT directly.
     """
     notebook_url = None
     if row.status == "running" and row.pod_ip:
-        # F-16: tokenless cached URL. The FE redeems a single-use handshake token
-        # via POST /{id}/handshake right before navigation; the long-lived
-        # access_token must never be embedded in an FE-facing URL.
-        notebook_url = f"/notebook/{row.id}/_init"
+        notebook_url = f"/notebook/{row.id}/"
     return NotebookSessionInfo(
         id=row.id,
         org_id=row.org_id,

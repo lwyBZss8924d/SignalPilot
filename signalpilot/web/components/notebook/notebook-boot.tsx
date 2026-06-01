@@ -104,7 +104,7 @@ export default function NotebookBoot({
       staticDataRef.current = null;
       setReady(false);
     };
-  }, [config.sessionId, config.token, config.gatewayUrl, config.project, config.branch, hostNavigate, handlePhase]);
+  }, [config.sessionId, config.gatewayUrl, config.project, config.branch, hostNavigate, handlePhase]);
 
   if (error) {
     return (
@@ -126,7 +126,7 @@ export default function NotebookBoot({
         client={clientRef.current}
         config={{
           gatewayUrl: config.gatewayUrl,
-          gatewayApiKey: config.apiKey,
+          gatewayApiKey: staticData.gatewayToken,
           filename: staticData.filename,
           initialCode: staticData.code,
           session: staticData.session,

@@ -5,10 +5,12 @@ import React from "react";
 export interface NotebookConfig {
   gatewayUrl: string;
   sessionId: string;
-  /** Session access token (from notebook_url ?token= param) */
-  token: string;
-  /** Local API key for gateway workspace calls */
-  apiKey?: string;
+  /**
+   * Resolve the gateway auth token (Clerk JWT in cloud, null in local-noauth).
+   * Called per request so a refreshed Clerk token is always used. The notebook
+   * proxy authenticates this token directly — there is no per-session cookie.
+   */
+  getToken: () => Promise<string | null>;
   /** Project ID from URL */
   project?: string;
   /** Branch from URL */

@@ -23,11 +23,12 @@ async function getBaseUrlAndHeaders(): Promise<{
       /* webpackIgnore: true */ "../../components/notebook/notebook-context"
     );
     const config = getNotebookConfig();
+    const token = await config.getToken();
     return {
       baseUrl: `${config.gatewayUrl}/notebook/${config.sessionId}/`,
       headers: {
-        Authorization: `Bearer ${config.token}`,
         "Content-Type": "application/json",
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
       },
     };
   } catch {

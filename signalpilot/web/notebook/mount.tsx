@@ -331,7 +331,14 @@ export const mountOptionsSchema = z.object({
         url: z.string(),
         // Lazy by default, but can be overridden by the runtime config
         lazy: z.boolean().default(true),
-        authToken: z.string().nullish(),
+        // string | (() => string | Promise<string>) — the embed passes a thunk
+        // that resolves a fresh Clerk JWT per request. z.custom passes functions
+        // through unchanged (z.string() would strip them, dropping auth).
+        authToken: z
+          .custom<string | (() => string | Promise<string>)>(
+            (v) => v == null || typeof v === "string" || typeof v === "function",
+          )
+          .nullish(),
       }),
     )
     .nullish()

@@ -222,9 +222,22 @@ async def resolve_user_id(connection: HTTPConnection) -> str:
     if not token:
         raise HTTPException(status_code=401, detail="Authentication required")
 
-    # 3. Decode unverified to inspect iss — one token → one verifier.
-    # Pin algorithm first: reject alg=none and any unexpected algorithm before
-    # reading payload claims, to guard against PyJWT regressions.
+    return await verify_jwt_token(connection, token)
+
+
+async def verify_jwt_token(connection: HTTPConnection, token: str) -> str:
+    """Verify an explicit JWT (Clerk or notebook-session) and return user_id.
+
+    Decodes the iss unverified to pick exactly one verifier (one token → one
+    verifier), then verifies signature. Sets connection.state._jwt_claims so
+    resolve_org_id can read org without re-decoding. Used both by resolve_user_id
+    (token from Authorization header / __session cookie) and by the notebook WS
+    proxy (token from the Sec-WebSocket-Protocol two-token form, since browsers
+    cannot set Authorization on a WebSocket).
+    """
+    # Decode unverified to inspect iss. Pin algorithm first: reject alg=none and
+    # any unexpected algorithm before reading payload claims, to guard against
+    # PyJWT regressions.
     try:
         header = jwt.get_unverified_header(token)
     except jwt.DecodeError:

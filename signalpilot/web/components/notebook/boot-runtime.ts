@@ -12,6 +12,9 @@ export interface NotebookStaticData {
   code?: string;
   session?: unknown;
   notebook?: unknown;
+  /** Gateway auth token resolved at boot (Clerk JWT in cloud, "" in local).
+   * Handed to the editor so its own gateway /api calls authenticate. */
+  gatewayToken?: string;
 }
 
 export interface BootResult {
@@ -33,9 +36,13 @@ export async function bootRuntime(
   signal: AbortSignal,
 ): Promise<BootResult> {
   const runtimeUrl = `${config.gatewayUrl}/notebook/${config.sessionId}`;
+  // Auth: the proxy verifies the caller's Clerk JWT (cloud) directly; in local
+  // mode there's no token. Resolve once for the boot fetches; the long-lived
+  // embed client gets the getToken thunk so it always uses a fresh token.
+  const bootToken = await config.getToken();
   const headers: Record<string, string> = {
-    Authorization: `Bearer ${config.token}`,
     "Content-Type": "application/json",
+    ...(bootToken ? { Authorization: `Bearer ${bootToken}` } : {}),
   };
 
   // ── Phase 1: Wait for runtime healthy ──────────────────────────
@@ -155,7 +162,9 @@ export async function bootRuntime(
   const client = createSignalpilotClient({
     runtimeConfig: {
       url: runtimeUrl,
-      authToken: config.token,
+      // Thunk: resolves a fresh Clerk JWT per request (HTTP Authorization header
+      // and WS Sec-WebSocket-Protocol). Empty string in local-noauth mode.
+      authToken: async () => (await config.getToken()) ?? "",
       lazy: false,
       healthVerified: true,
     },
@@ -164,7 +173,7 @@ export async function bootRuntime(
   });
 
   // ── Phase 5: Fetch notebook static data (file content + session) ──
-  const staticData: NotebookStaticData = { filename: config.file };
+  const staticData: NotebookStaticData = { filename: config.file, gatewayToken: bootToken ?? "" };
 
   if (config.file) {
     try {

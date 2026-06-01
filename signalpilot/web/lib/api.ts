@@ -106,6 +106,19 @@ export async function getAuthHeaders(): Promise<Record<string, string>> {
   return h;
 }
 
+/**
+ * Resolve the raw gateway auth token (no "Bearer " prefix): the Clerk JWT in
+ * cloud mode, the sp_ API key in local mode, or null when local-noauth. The
+ * notebook proxy authenticates with this exact token — over the Authorization
+ * header for HTTP and the Sec-WebSocket-Protocol two-token form for WS — so the
+ * embed client is given this as its authToken thunk.
+ */
+export async function getGatewayAuthToken(): Promise<string | null> {
+  const header = await _getAuthHeader();
+  if (!header) return null;
+  return header.startsWith("Bearer ") ? header.slice(7) : header;
+}
+
 export async function request<T>(path: string, options?: RequestInit, _retried = false): Promise<T> {
   const authHeader = await _getAuthHeader();
   const headers: Record<string, string> = {
@@ -455,11 +468,6 @@ export const deleteNotebookSession = () =>
 
 export const pingNotebookSession = () =>
   request<void>("/api/notebook-sessions/ping", { method: "POST" });
-
-// F-16: redeem a single-use handshake token right before navigating/mounting the
-// notebook iframe. Returns a /_init?token=... URL valid for INIT_TOKEN_TTL_S.
-export const requestNotebookHandshake = (sessionId: string): Promise<{ url: string }> =>
-  request<{ url: string }>(`/api/notebook-sessions/${sessionId}/handshake`, { method: "POST" });
 
 // GitHub App
 export const getGitHubInstallUrl = () =>

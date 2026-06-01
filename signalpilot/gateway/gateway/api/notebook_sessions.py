@@ -7,14 +7,12 @@ import logging
 import os
 import re
 
-from fastapi import APIRouter, HTTPException, Response
+from fastapi import APIRouter, HTTPException
 
 from ..auth.notebook_jwt import mint_session_jwt
 from ..config.k8s import get_k8s_settings
 from ..models.notebook_sessions import NotebookSessionCreate, NotebookSessionInfo
 from ..notebook_proxy.constants import SESSION_ID_PATTERN_STR
-from ..notebook_proxy.cookies import clear_proxy_cookie
-from ..notebook_proxy.init_token import issue_init_token
 from ..runtime.mode import is_cloud_mode
 from ..security.scope_guard import RequireScope
 from .deps import ProjectsGate, StoreD
@@ -49,7 +47,7 @@ def _is_quota_exceeded_error(exc: Exception) -> bool:
 
 
 @router.post("", status_code=201, response_model=NotebookSessionInfo, dependencies=[RequireScope("write")])
-async def create_session(body: NotebookSessionCreate, store: StoreD, response: Response):
+async def create_session(body: NotebookSessionCreate, store: StoreD):
     """Create or return existing notebook session for the current user."""
     from ..store import notebook_sessions as ns
 
@@ -101,11 +99,9 @@ async def create_session(body: NotebookSessionCreate, store: StoreD, response: R
         )
         session_info.status = "running"
         session_info.pod_ip = host_port
-        # F-16: single-use handshake token (not the long-lived access_token).
-        session_info.notebook_url = (
-            f"/notebook/{session_info.id}/_init"
-            f"?token={issue_init_token(session_info.id, user_id)}"
-        )
+        # The proxy authenticates the browser's Clerk JWT directly (no cookie/init
+        # token); the URL is just the proxy path.
+        session_info.notebook_url = f"/notebook/{session_info.id}/"
         return session_info
 
     pod = _pod_name(org_id, user_id)
@@ -198,12 +194,9 @@ async def create_session(body: NotebookSessionCreate, store: StoreD, response: R
         )
         session_info.status = "running"
         session_info.pod_ip = pod_info.ip
-        # F-16: single-use handshake token redeemed once at /_init; not the
-        # long-lived access_token. The FE re-handshakes for cached/reused sessions.
-        session_info.notebook_url = (
-            f"/notebook/{session_info.id}/_init"
-            f"?token={issue_init_token(session_info.id, user_id)}"
-        )
+        # The proxy authenticates the browser's Clerk JWT directly (no cookie/init
+        # token); the URL is just the proxy path.
+        session_info.notebook_url = f"/notebook/{session_info.id}/"
 
     except ValueError as e:
         logger.warning("Invalid org_id for notebook session: %s", e)
@@ -263,7 +256,7 @@ async def get_session_by_id(session_id: str, store: StoreD):
 
 
 @router.delete("", status_code=204, response_model=None, dependencies=[RequireScope("write")])
-async def delete_session(store: StoreD, response: Response):
+async def delete_session(store: StoreD):
     """Kill current user's notebook session."""
     from ..store import notebook_sessions as ns
 
@@ -281,11 +274,9 @@ async def delete_session(store: StoreD, response: Response):
         await orch.delete_pod(session.pod_name, org_id=org_id or "")
     await ns.mark_stopped(store.session, session_id=session.id)
 
-    clear_proxy_cookie(response, session_id=session.id, secure=is_cloud_mode())
-
 
 @router.delete("/{session_id}", status_code=204, response_model=None, dependencies=[RequireScope("write")])
-async def delete_session_by_id(session_id: str, store: StoreD, response: Response):
+async def delete_session_by_id(session_id: str, store: StoreD):
     """Delete a specific session by id, scoped to the caller's org and user.
 
     Returns 404 on missing, cross-org, OR cross-user (same-org peers cannot
@@ -293,9 +284,7 @@ async def delete_session_by_id(session_id: str, store: StoreD, response: Respons
     """
     from ..store import notebook_sessions as ns
 
-    # M-4: Validate session_id charset BEFORE any cookie/header construction.
-    # This is defense in depth — clear_proxy_cookie interpolates session_id into
-    # a Set-Cookie Path= attribute, so CR/LF/semicolons must never reach it.
+    # M-4: Validate session_id charset at the boundary (defense in depth).
     if not _SESSION_ID_PATTERN.match(session_id):
         raise HTTPException(status_code=404, detail="Session not found")
 
@@ -314,9 +303,6 @@ async def delete_session_by_id(session_id: str, store: StoreD, response: Respons
     if session.pod_name:
         await orch.delete_pod(session.pod_name, org_id=org_id)
     await ns.mark_stopped(store.session, session_id=session.id)
-
-    # Clear the proxy cookie with the correct path.
-    clear_proxy_cookie(response, session_id=session_id, secure=is_cloud_mode())
 
 
 @router.post("/{session_id}/ping", response_model=NotebookSessionInfo | None, dependencies=[RequireScope("read")])
@@ -357,32 +343,3 @@ async def ping_session(store: StoreD):
 
     org_id = store.org_id or ""
     return await ns.ping_session(store.session, org_id=org_id, user_id=store.user_id or "local")
-
-
-@router.post("/{session_id}/handshake", dependencies=[RequireScope("read")])
-async def handshake_session(session_id: str, store: StoreD) -> dict[str, str]:
-    """Issue a single-use handshake token for the caller's session (F-16).
-
-    The FE calls this immediately before navigation/iframe mount when the cached
-    GET response returns a tokenless notebook_url. The returned URL is valid for
-    INIT_TOKEN_TTL_S seconds and redeems exactly once at /_init.
-    """
-    from ..store import notebook_sessions as ns
-
-    # M-4: Validate session_id charset at the boundary.
-    if not _SESSION_ID_PATTERN.match(session_id):
-        raise HTTPException(status_code=404, detail="Session not found")
-
-    org_id = store.org_id or ""
-    user_id = store.user_id or "local"
-
-    session = await ns.get_session_by_id(store.session, session_id=session_id, org_id=org_id)
-    if not session:
-        raise HTTPException(status_code=404, detail="Session not found")
-
-    # M-1: Ownership check — same-org peers cannot obtain tokens for each other's sessions.
-    if session.user_id != user_id:
-        raise HTTPException(status_code=404, detail="Session not found")
-
-    token = issue_init_token(session_id, user_id)
-    return {"url": f"/notebook/{session_id}/_init?token={token}"}
