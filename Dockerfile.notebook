@@ -24,7 +24,13 @@ RUN uv sync --frozen --no-dev && \
       seaborn scikit-learn scipy \
       anthropic openai tiktoken \
       dbt-postgres dbt-snowflake && \
-    python -m compileall -q /opt/sp-notebook/signalpilot 2>/dev/null || true && \
+    # Bake in-tree .pyc for BOTH the app and the whole venv (12k+ dep files).
+    # The kernel runs on a read-only root (F-7) so it can never write .pyc at
+    # runtime — without this every interpreter start (entrypoint + sync_boot +
+    # `sp edit` + each kernel) recompiles every dependency from source. Compiling
+    # at build time means runtime imports read the cached .pyc with zero compile
+    # cost. -j 0 = all cores; ignore failures on optional/py2 files.
+    python -m compileall -q -j 0 /opt/sp-notebook/signalpilot /opt/sp-notebook/.venv/lib 2>/dev/null || true && \
     chown -R notebook:notebook /opt/sp-notebook /workspace /home/notebook
 
 ENV PATH="/opt/sp-notebook/.venv/bin:$PATH"
