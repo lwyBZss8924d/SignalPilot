@@ -21,7 +21,16 @@ _configured = False
 _lock = threading.Lock()
 
 _PRELOAD_MODULES = [
+    # The forkserver imports these ONCE at startup; every kernel fork() then
+    # inherits the already-imported modules via copy-on-write, so per-kernel
+    # spawn skips re-importing the heavy signalpilot graph (~1.3s of
+    # _islands/_ast/_client.agent/requests work measured via -X importtime).
+    # `signalpilot` (top-level __init__) is the big one — it eagerly pulls App,
+    # Cell, _islands, the ui plugins, and _client.agent->requests. Preloading it
+    # means kernels fork instantly instead of paying that import each spawn.
+    "signalpilot",
     "signalpilot._runtime.runtime",
+    "signalpilot._runtime.app.kernel_runner",
     "signalpilot._messaging.notification",
     "signalpilot._ast.compiler",
 ]

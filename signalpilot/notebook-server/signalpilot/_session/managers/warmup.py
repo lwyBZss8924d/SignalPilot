@@ -28,7 +28,14 @@ def preload_kernel_modules() -> None:
     created.  Safe to call on any platform.
     """
     _modules = [
+        # `signalpilot` (top-level __init__) eagerly imports App/Cell/_islands/
+        # the ui plugins/_client.agent->requests — ~1.3s measured. Importing it
+        # here at server boot (before any user connects) means the forkserver and
+        # every forked kernel inherit it via copy-on-write, so a kernel spawn pays
+        # ~0 import cost instead of ~1.3s. This is the dominant per-spawn latency.
+        "signalpilot",
         "signalpilot._runtime.runtime",
+        "signalpilot._runtime.app.kernel_runner",
         "signalpilot._ast.compiler",
         "signalpilot._messaging.notification",
         "signalpilot._output.formatters.formatters",
