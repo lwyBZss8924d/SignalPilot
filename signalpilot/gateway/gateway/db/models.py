@@ -332,6 +332,79 @@ class GatewayNotionIntegration(GatewayBase):
         }
 
 
+class NotionInstallation(GatewayBase):
+    """OAuth-installed Notion public connection scoped by org."""
+
+    __tablename__ = "notion_installations"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    org_id: Mapped[str] = mapped_column(String, nullable=False)
+    user_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    workspace_id: Mapped[str] = mapped_column(String(100), nullable=False)
+    workspace_name: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    bot_id: Mapped[str] = mapped_column(String(100), nullable=False)
+    owner_user_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    access_token_enc: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    refresh_token_enc: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    owner: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="connected", server_default="connected")
+    created_at: Mapped[datetime] = mapped_column(TZDateTime, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(TZDateTime, server_default=func.now(), onupdate=func.now())
+
+    __table_args__ = (
+        UniqueConstraint("org_id", "workspace_id", "bot_id", name="uq_notion_install_org_workspace_bot"),
+        Index("ix_notion_install_org_status", "org_id", "status"),
+        Index("ix_notion_install_workspace", "workspace_id"),
+    )
+
+
+class NotionInstallationConfig(GatewayBase):
+    """Provisioning metadata for a Notion OAuth installation."""
+
+    __tablename__ = "notion_installation_config"
+
+    installation_id: Mapped[str] = mapped_column(String, primary_key=True)
+    parent_page_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    trigger_page_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    requests_data_source_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    requests_database_page_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+
+
+class NotionWebhookDelivery(GatewayBase):
+    """Idempotency and audit record for Notion webhook deliveries."""
+
+    __tablename__ = "notion_webhook_deliveries"
+
+    event_id: Mapped[str] = mapped_column(String(100), primary_key=True)
+    installation_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    org_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    status: Mapped[str] = mapped_column(String(20), nullable=False)
+    attempt_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(TZDateTime, server_default=func.now())
+    processed_at: Mapped[datetime | None] = mapped_column(TZDateTime, nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    __table_args__ = (
+        Index("ix_notion_delivery_install", "installation_id"),
+        Index("ix_notion_delivery_org_status", "org_id", "status"),
+    )
+
+
+class NotionOAuthState(GatewayBase):
+    """Short-lived OAuth state for CSRF protection and post-install redirect."""
+
+    __tablename__ = "notion_oauth_states"
+
+    state: Mapped[str] = mapped_column(String(128), primary_key=True)
+    org_id: Mapped[str] = mapped_column(String, nullable=False)
+    user_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    redirect_after: Mapped[str | None] = mapped_column(Text, nullable=True)
+    expires_at: Mapped[datetime] = mapped_column(TZDateTime, nullable=False)
+
+    __table_args__ = (Index("ix_notion_oauth_states_expires", "expires_at"),)
+
+
 class GatewayApiKey(GatewayBase):
     __tablename__ = "gateway_api_keys"
 
