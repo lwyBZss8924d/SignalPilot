@@ -156,6 +156,26 @@ async def git_http_handler(project_id: str, remainder: str, request: Request):
 
     # 7. Read body with size limit for pushes
     body = await request.body()
+
+    # git clients gzip the upload-pack/receive-pack POST body and send
+    # `Content-Encoding: gzip`. git-http-backend does NOT inflate it, so the raw
+    # gzip bytes reach upload-pack as pkt-lines → "fatal: protocol error: bad line
+    # length character" and the clone hangs ("the remote end hung up"). Inflate
+    # here and pass the decompressed body (CONTENT_LENGTH is set from len(body)
+    # below, after this, so it stays correct). gzip and deflate both occur in the
+    # wild; handle both.
+    content_encoding = request.headers.get("content-encoding", "").lower().strip()
+    if content_encoding in ("gzip", "x-gzip", "deflate"):
+        import zlib
+        try:
+            if content_encoding == "deflate":
+                body = zlib.decompress(body)
+            else:
+                body = zlib.decompress(body, 16 + zlib.MAX_WBITS)
+        except zlib.error as exc:
+            logger.warning("git: failed to inflate %s body: %s", content_encoding, exc)
+            raise HTTPException(status_code=400, detail="Malformed request encoding")
+
     if is_write and len(body) > _MAX_PUSH_BYTES:
         raise HTTPException(status_code=413, detail="Push too large")
 
