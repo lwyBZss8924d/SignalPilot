@@ -35,6 +35,9 @@ if is_cloud_mode() and not os.environ.get("CLERK_PUBLISHABLE_KEY"):
 
 _auth_cfg = get_auth_settings()
 EXPECTED_AUDIENCE = _auth_cfg.clerk_jwt_audience
+EXPECTED_AZP: frozenset[str] = frozenset(
+    p.strip() for p in _auth_cfg.sp_expected_azp.split(",") if p.strip()
+)
 JWT_LEEWAY_SECONDS = _auth_cfg.sp_jwt_leeway
 
 
@@ -153,6 +156,9 @@ async def _resolve_via_clerk(connection: HTTPConnection, token: str) -> str:
             options["verify_aud"] = False
         decode_kwargs["options"] = options
         claims = jwt.decode(token, signing_key.key, **decode_kwargs)
+        if EXPECTED_AZP and claims.get("azp") not in EXPECTED_AZP:
+            logger.warning("Clerk JWT azp mismatch")
+            raise HTTPException(status_code=401, detail="Invalid authentication token")
         user_id = claims.get("sub")
         if not user_id:
             raise HTTPException(status_code=401, detail="Token missing sub claim")

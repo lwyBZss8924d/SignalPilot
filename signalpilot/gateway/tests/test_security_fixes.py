@@ -1079,3 +1079,131 @@ class TestL6SessionMutationsOrgFilter:
         where_str = self._where_clause_str(captured[0])
         assert "org-a" in where_str
         assert "sess-4" in where_str
+
+
+# ─── I-2: SP_EXPECTED_AZP allowlist enforcement in Clerk verifier ────────────
+
+
+class TestClerkAzpAllowlist:
+    """I-2: SP_EXPECTED_AZP azp allowlist enforcement in the Clerk JWT verifier."""
+
+    @pytest.mark.asyncio
+    async def test_azp_mismatch_rejected_when_allowlist_set(self, monkeypatch) -> None:
+        """azp not in allowlist → 401 Invalid authentication token."""
+        import base64
+        import json
+        import time
+
+        from fastapi import HTTPException
+
+        from gateway.auth.user import resolve_user_id
+
+        monkeypatch.setattr("gateway.auth.user.EXPECTED_AZP", frozenset({"https://app.signalpilot.com"}))
+
+        clerk_payload = {
+            "iss": "https://clerk.example.com",
+            "sub": "user_1",
+            "azp": "https://evil.example.com",
+            "iat": int(time.time()),
+            "exp": int(time.time()) + 3600,
+        }
+        header_b64 = base64.urlsafe_b64encode(json.dumps({"alg": "RS256", "typ": "JWT"}).encode()).rstrip(b"=")
+        payload_b64 = base64.urlsafe_b64encode(json.dumps(clerk_payload).encode()).rstrip(b"=")
+        fake_sig = base64.urlsafe_b64encode(b"fakesignature").rstrip(b"=")
+        clerk_token = f"{header_b64.decode()}.{payload_b64.decode()}.{fake_sig.decode()}"
+
+        with patch("gateway.auth.user.is_cloud_mode", return_value=True):
+            mock_client = MagicMock()
+            mock_client.get_signing_key_from_jwt.return_value = MagicMock()
+
+            with patch("gateway.auth.user._get_jwks_client", return_value=mock_client):
+                with patch("gateway.auth.user.jwt.decode", return_value=clerk_payload):
+                    request = MagicMock()
+                    request.headers.get.return_value = f"Bearer {clerk_token}"
+                    request.cookies.get.return_value = None
+                    request.state = MagicMock(spec=[])
+
+                    with pytest.raises(HTTPException) as exc_info:
+                        await resolve_user_id(request)
+
+                    assert exc_info.value.status_code == 401
+                    assert exc_info.value.detail == "Invalid authentication token"
+
+    @pytest.mark.asyncio
+    async def test_azp_missing_rejected_when_allowlist_set(self, monkeypatch) -> None:
+        """azp claim absent → 401 Invalid authentication token when allowlist set."""
+        import base64
+        import json
+        import time
+
+        from fastapi import HTTPException
+
+        from gateway.auth.user import resolve_user_id
+
+        monkeypatch.setattr("gateway.auth.user.EXPECTED_AZP", frozenset({"https://app.signalpilot.com"}))
+
+        clerk_payload = {
+            "iss": "https://clerk.example.com",
+            "sub": "user_1",
+            "iat": int(time.time()),
+            "exp": int(time.time()) + 3600,
+        }
+        header_b64 = base64.urlsafe_b64encode(json.dumps({"alg": "RS256", "typ": "JWT"}).encode()).rstrip(b"=")
+        payload_b64 = base64.urlsafe_b64encode(json.dumps(clerk_payload).encode()).rstrip(b"=")
+        fake_sig = base64.urlsafe_b64encode(b"fakesignature").rstrip(b"=")
+        clerk_token = f"{header_b64.decode()}.{payload_b64.decode()}.{fake_sig.decode()}"
+
+        with patch("gateway.auth.user.is_cloud_mode", return_value=True):
+            mock_client = MagicMock()
+            mock_client.get_signing_key_from_jwt.return_value = MagicMock()
+
+            with patch("gateway.auth.user._get_jwks_client", return_value=mock_client):
+                with patch("gateway.auth.user.jwt.decode", return_value=clerk_payload):
+                    request = MagicMock()
+                    request.headers.get.return_value = f"Bearer {clerk_token}"
+                    request.cookies.get.return_value = None
+                    request.state = MagicMock(spec=[])
+
+                    with pytest.raises(HTTPException) as exc_info:
+                        await resolve_user_id(request)
+
+                    assert exc_info.value.status_code == 401
+                    assert exc_info.value.detail == "Invalid authentication token"
+
+    @pytest.mark.asyncio
+    async def test_azp_not_enforced_when_env_unset(self, monkeypatch) -> None:
+        """EXPECTED_AZP empty frozenset → azp check is a no-op, returns user_id."""
+        import base64
+        import json
+        import time
+
+        from gateway.auth.user import resolve_user_id
+
+        monkeypatch.setattr("gateway.auth.user.EXPECTED_AZP", frozenset())
+
+        clerk_payload = {
+            "iss": "https://clerk.example.com",
+            "sub": "user_1",
+            "azp": "anything",
+            "iat": int(time.time()),
+            "exp": int(time.time()) + 3600,
+        }
+        header_b64 = base64.urlsafe_b64encode(json.dumps({"alg": "RS256", "typ": "JWT"}).encode()).rstrip(b"=")
+        payload_b64 = base64.urlsafe_b64encode(json.dumps(clerk_payload).encode()).rstrip(b"=")
+        fake_sig = base64.urlsafe_b64encode(b"fakesignature").rstrip(b"=")
+        clerk_token = f"{header_b64.decode()}.{payload_b64.decode()}.{fake_sig.decode()}"
+
+        with patch("gateway.auth.user.is_cloud_mode", return_value=True):
+            mock_client = MagicMock()
+            mock_client.get_signing_key_from_jwt.return_value = MagicMock()
+
+            with patch("gateway.auth.user._get_jwks_client", return_value=mock_client):
+                with patch("gateway.auth.user.jwt.decode", return_value=clerk_payload):
+                    request = MagicMock()
+                    request.headers.get.return_value = f"Bearer {clerk_token}"
+                    request.cookies.get.return_value = None
+                    request.state = MagicMock(spec=[])
+
+                    result = await resolve_user_id(request)
+
+                    assert result == "user_1"
