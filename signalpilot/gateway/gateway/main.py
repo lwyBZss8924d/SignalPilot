@@ -109,6 +109,10 @@ async def lifespan(app: FastAPI):
     else:
         logger.info("STARTUP: Encryption health check passed.")
 
+    # Verify OAuth state-signing key is resolvable (cloud mode raises if SP_ENCRYPTION_KEY absent)
+    from .api._oauth_state import get_state_hmac_key
+    get_state_hmac_key()  # raises RuntimeError in cloud mode when key missing — fail fast
+
     # Configure BYOK provider — type and config are read from env vars at startup.
     # SP_BYOK_PROVIDER: provider type string (default: "local")
     # SP_BYOK_PROVIDER_CONFIG: JSON-encoded provider config dict (optional)
