@@ -127,7 +127,7 @@ async def run_notebook(
 
             # Clean up any stale session
             if existing:
-                await ns.mark_stopped(session, session_id=existing.id)
+                await ns.mark_stopped(session, session_id=existing.id, org_id=existing.org_id)
             await ns.delete_stopped(session, org_id=org_id, user_id=user_id)
 
             session_info = await ns.create_session(
@@ -152,7 +152,7 @@ async def run_notebook(
 
             await orch._ensure_client()
             if not orch._core_api:
-                await ns.update_session_status(session, session_id=session_id, status="error")
+                await ns.update_session_status(session, session_id=session_id, org_id=org_id, status="error")
                 return "Error starting notebook pod: K8s orchestrator not available"
             core_v1 = orch._core_api
             # Ensure the namespace exists BEFORE the Secret (else create fails on a new org).
@@ -177,7 +177,7 @@ async def run_notebook(
                     session_jwt=session_jwt, create_pod_fn=_create_pod_fn,
                 )
             except Exception as exc:
-                await ns.update_session_status(session, session_id=session_id, status="error")
+                await ns.update_session_status(session, session_id=session_id, org_id=org_id, status="error")
                 return f"Error starting notebook pod: {exc}"
 
             # Outer try: pod EXISTS here; readiness waits are ours to clean up.
@@ -188,12 +188,12 @@ async def run_notebook(
                 await orch.wait_for_ready(pod_name, org_id=org_id, timeout=90)
                 pod_info = await orch.get_pod(pod_name, org_id=org_id)
                 await ns.update_session_status(
-                    session, session_id=session_id, status="running",
+                    session, session_id=session_id, org_id=org_id, status="running",
                     pod_ip=pod_info.ip if pod_info else None,
                     pod_ip_internal=pod_info.ip if pod_info else None,
                 )
             except Exception as exc:
-                await ns.update_session_status(session, session_id=session_id, status="error")
+                await ns.update_session_status(session, session_id=session_id, org_id=org_id, status="error")
                 try:
                     await orch.delete_pod(pod_name, org_id=org_id)
                 except Exception:

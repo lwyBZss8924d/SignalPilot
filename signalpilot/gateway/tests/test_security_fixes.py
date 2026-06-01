@@ -6,12 +6,14 @@ Each test class covers one vulnerability finding.
 from __future__ import annotations
 
 import asyncio
+import logging
 import struct
 import uuid
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi import FastAPI
+from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.testclient import TestClient
 
 from gateway.dbt_proxy.tokens import RunTokenClaims
@@ -846,3 +848,234 @@ class TestL1CookieCsrfOriginCheck:
         resp = client.post("/echo", cookies={"__session": "abc"})
         assert resp.status_code == 403
         assert resp.json() == {"detail": "Forbidden."}
+
+
+# ─── L-1: CLERK_JWT_AUDIENCE hard-fail in cloud mode ─────────────────────────
+
+
+# Env vars that must be set to avoid other kill-switches tripping during L-1/I-5 tests.
+_CLOUD_HARDENING_BASE_ENV = {
+    "SP_DEPLOYMENT_MODE": "cloud",
+    "SP_NOTEBOOK_RUNTIME_CLASS": "gvisor",
+    "CLERK_JWT_AUDIENCE": "my-app",
+}
+
+
+def _set_cloud_base(monkeypatch, **overrides) -> None:
+    """Set the minimum env to pass assert_cloud_hardening_intact in cloud mode."""
+    env = {**_CLOUD_HARDENING_BASE_ENV, **overrides}
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    # Ensure vars that should be absent are absent
+    monkeypatch.delenv("SP_NOTEBOOK_DIRECT_URL", raising=False)
+    monkeypatch.delenv("SP_DISABLE_SANDBOX", raising=False)
+    monkeypatch.delenv("SP_NOTEBOOK_NETWORK_POLICY", raising=False)
+    monkeypatch.delenv("SP_NOTEBOOK_NETWORK_POLICY_CLOUD_ACK", raising=False)
+
+
+class TestL1ClerkAudienceHardFailCloud:
+    """L-1: assert_cloud_hardening_intact() fails fast when CLERK_JWT_AUDIENCE is
+    unset or empty in cloud mode."""
+
+    def test_cloud_mode_missing_audience_raises(self, monkeypatch) -> None:
+        _set_cloud_base(monkeypatch)
+        monkeypatch.delenv("CLERK_JWT_AUDIENCE", raising=False)
+
+        from gateway.runtime.mode import assert_cloud_hardening_intact
+
+        with pytest.raises(RuntimeError, match="CLERK_JWT_AUDIENCE"):
+            assert_cloud_hardening_intact()
+
+    def test_cloud_mode_present_audience_passes(self, monkeypatch) -> None:
+        _set_cloud_base(monkeypatch, CLERK_JWT_AUDIENCE="my-app")
+
+        from gateway.runtime.mode import assert_cloud_hardening_intact
+
+        assert_cloud_hardening_intact()  # must not raise
+
+    def test_local_mode_missing_audience_passes(self, monkeypatch) -> None:
+        monkeypatch.setenv("SP_DEPLOYMENT_MODE", "local")
+        monkeypatch.delenv("CLERK_JWT_AUDIENCE", raising=False)
+
+        from gateway.runtime.mode import assert_cloud_hardening_intact
+
+        assert_cloud_hardening_intact()  # local mode: no checks
+
+    def test_cloud_mode_empty_string_audience_raises(self, monkeypatch) -> None:
+        _set_cloud_base(monkeypatch, CLERK_JWT_AUDIENCE="   ")
+
+        from gateway.runtime.mode import assert_cloud_hardening_intact
+
+        with pytest.raises(RuntimeError, match="CLERK_JWT_AUDIENCE"):
+            assert_cloud_hardening_intact()
+
+
+# ─── I-5: SP_NOTEBOOK_NETWORK_POLICY=false hard-fail with opt-in ─────────────
+
+
+class TestI5NetworkPolicyOptOutHardFailCloud:
+    """I-5: SP_NOTEBOOK_NETWORK_POLICY=false must trigger RuntimeError in cloud
+    mode unless SP_NOTEBOOK_NETWORK_POLICY_CLOUD_ACK=1|true|yes is set."""
+
+    def test_cloud_netpol_false_no_ack_raises(self, monkeypatch) -> None:
+        _set_cloud_base(monkeypatch)
+        monkeypatch.setenv("SP_NOTEBOOK_NETWORK_POLICY", "false")
+        monkeypatch.delenv("SP_NOTEBOOK_NETWORK_POLICY_CLOUD_ACK", raising=False)
+
+        from gateway.runtime.mode import assert_cloud_hardening_intact
+
+        with pytest.raises(RuntimeError, match="SP_NOTEBOOK_NETWORK_POLICY"):
+            assert_cloud_hardening_intact()
+
+    def test_cloud_netpol_false_with_ack_warns_only(self, monkeypatch, caplog) -> None:
+        _set_cloud_base(monkeypatch)
+        monkeypatch.setenv("SP_NOTEBOOK_NETWORK_POLICY", "false")
+        monkeypatch.setenv("SP_NOTEBOOK_NETWORK_POLICY_CLOUD_ACK", "1")
+
+        from gateway.runtime.mode import assert_cloud_hardening_intact
+
+        with caplog.at_level(logging.WARNING, logger="gateway.runtime.mode"):
+            assert_cloud_hardening_intact()  # must not raise
+
+        assert any("SP_NOTEBOOK_NETWORK_POLICY=false" in r.message for r in caplog.records)
+
+    def test_cloud_netpol_true_passes(self, monkeypatch) -> None:
+        _set_cloud_base(monkeypatch)
+        monkeypatch.setenv("SP_NOTEBOOK_NETWORK_POLICY", "true")
+
+        from gateway.runtime.mode import assert_cloud_hardening_intact
+
+        assert_cloud_hardening_intact()  # must not raise
+
+    def test_local_netpol_false_passes(self, monkeypatch) -> None:
+        monkeypatch.setenv("SP_DEPLOYMENT_MODE", "local")
+        monkeypatch.setenv("SP_NOTEBOOK_NETWORK_POLICY", "false")
+        monkeypatch.delenv("SP_NOTEBOOK_NETWORK_POLICY_CLOUD_ACK", raising=False)
+
+        from gateway.runtime.mode import assert_cloud_hardening_intact
+
+        assert_cloud_hardening_intact()  # local mode: no checks
+
+    @pytest.mark.parametrize(
+        "ack,should_raise",
+        [
+            ("1", False),
+            ("true", False),
+            ("yes", False),
+            ("TRUE", False),
+            ("Yes", False),
+            ("", True),
+            ("0", True),
+            ("false", True),
+            ("no", True),
+        ],
+    )
+    def test_cloud_netpol_false_ack_truthy_variants(
+        self, monkeypatch, ack: str, should_raise: bool
+    ) -> None:
+        _set_cloud_base(monkeypatch)
+        monkeypatch.setenv("SP_NOTEBOOK_NETWORK_POLICY", "false")
+        monkeypatch.setenv("SP_NOTEBOOK_NETWORK_POLICY_CLOUD_ACK", ack)
+
+        from gateway.runtime.mode import assert_cloud_hardening_intact
+
+        if should_raise:
+            with pytest.raises(RuntimeError, match="SP_NOTEBOOK_NETWORK_POLICY"):
+                assert_cloud_hardening_intact()
+        else:
+            assert_cloud_hardening_intact()  # must not raise
+
+
+# ─── L-6: org_id filter on session mutation helpers ──────────────────────────
+
+
+class TestL6SessionMutationsOrgFilter:
+    """L-6: update_session_status and mark_stopped must pass org_id in the WHERE
+    clause so a cross-org call is a silent no-op (defense-in-depth).
+
+    We capture the SQLAlchemy Update clause passed to session.execute and verify
+    that org_id is present in the WHERE criteria — no live DB required.
+    """
+
+    def _make_async_session_capture(self) -> tuple[AsyncMock, list]:
+        """Return a mock AsyncSession and the list that captures execute calls."""
+        captured: list = []
+
+        async def _fake_execute(stmt, *args, **kwargs):
+            captured.append(stmt)
+            return MagicMock()
+
+        session = AsyncMock(spec=AsyncSession)
+        session.execute.side_effect = _fake_execute
+        session.commit = AsyncMock()
+        return session, captured
+
+    def _where_clause_str(self, stmt) -> str:
+        """Compile the WHERE clause of an Update statement to a string for inspection."""
+        from sqlalchemy.dialects import sqlite
+
+        return str(stmt.whereclause.compile(dialect=sqlite.dialect(), compile_kwargs={"literal_binds": True}))
+
+    @pytest.mark.asyncio
+    async def test_update_session_status_includes_org_id_in_where(self) -> None:
+        from gateway.store.notebook_sessions import update_session_status
+
+        session, captured = self._make_async_session_capture()
+
+        await update_session_status(
+            session,
+            session_id="sess-1",
+            org_id="org-b",
+            status="running",
+            pod_ip="1.2.3.4",
+        )
+
+        assert len(captured) == 1
+        where_str = self._where_clause_str(captured[0])
+        assert "org-b" in where_str
+        assert "sess-1" in where_str
+
+    @pytest.mark.asyncio
+    async def test_update_session_status_correct_org_in_where(self) -> None:
+        from gateway.store.notebook_sessions import update_session_status
+
+        session, captured = self._make_async_session_capture()
+
+        await update_session_status(
+            session,
+            session_id="sess-2",
+            org_id="org-a",
+            status="running",
+            pod_ip="10.0.0.1",
+        )
+
+        assert len(captured) == 1
+        where_str = self._where_clause_str(captured[0])
+        assert "org-a" in where_str
+        assert "sess-2" in where_str
+
+    @pytest.mark.asyncio
+    async def test_mark_stopped_wrong_org_includes_org_id_in_where(self) -> None:
+        from gateway.store.notebook_sessions import mark_stopped
+
+        session, captured = self._make_async_session_capture()
+
+        await mark_stopped(session, session_id="sess-3", org_id="org-b")
+
+        assert len(captured) == 1
+        where_str = self._where_clause_str(captured[0])
+        assert "org-b" in where_str
+        assert "sess-3" in where_str
+
+    @pytest.mark.asyncio
+    async def test_mark_stopped_correct_org_in_where(self) -> None:
+        from gateway.store.notebook_sessions import mark_stopped
+
+        session, captured = self._make_async_session_capture()
+
+        await mark_stopped(session, session_id="sess-4", org_id="org-a")
+
+        assert len(captured) == 1
+        where_str = self._where_clause_str(captured[0])
+        assert "org-a" in where_str
+        assert "sess-4" in where_str

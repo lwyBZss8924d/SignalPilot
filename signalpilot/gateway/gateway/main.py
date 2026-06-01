@@ -160,7 +160,7 @@ async def lifespan(app: FastAPI):
                 except Exception:
                     alive = False
                 if not alive:
-                    await mark_stopped(db_session, session_id=s.id)
+                    await mark_stopped(db_session, session_id=s.id, org_id=s.org_id or "")
                     logger.info("STARTUP: cleaned stale session %s (pod %s dead)", s.id, s.pod_name)
             await db_session.commit()
     except Exception as e:
@@ -326,7 +326,7 @@ async def lifespan(app: FastAPI):
                         logger.info("Cleaning up stale notebook session %s (pod=%s)", s.id, s.pod_name)
                         if s.pod_name:
                             await orch.delete_pod(s.pod_name, org_id=s.org_id or "")
-                        await ns.mark_stopped(session, session_id=s.id)
+                        await ns.mark_stopped(session, session_id=s.id, org_id=s.org_id or "")
             except Exception as e:
                 logger.warning("Notebook cleanup loop error: %s", e)
             # F-13: reap sp-jwt-* Secrets orphaned by a gateway crash between

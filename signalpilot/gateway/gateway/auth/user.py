@@ -37,8 +37,6 @@ _auth_cfg = get_auth_settings()
 EXPECTED_AUDIENCE = _auth_cfg.clerk_jwt_audience
 JWT_LEEWAY_SECONDS = _auth_cfg.sp_jwt_leeway
 
-if is_cloud_mode() and not EXPECTED_AUDIENCE:
-    logger.warning("CLERK_JWT_AUDIENCE not set — audience verification disabled. Set this for production security.")
 
 LOCAL_USER_ID = "local"
 LOCAL_ORG_ID = "local"
