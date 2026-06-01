@@ -858,6 +858,9 @@ _CLOUD_HARDENING_BASE_ENV = {
     "SP_DEPLOYMENT_MODE": "cloud",
     "SP_NOTEBOOK_RUNTIME_CLASS": "gvisor",
     "CLERK_JWT_AUDIENCE": "my-app",
+    # R11 added SP_ALLOWED_ORIGINS to assert_cloud_hardening_intact; without it
+    # these L-1/I-5 tests would trip the unrelated SP_ALLOWED_ORIGINS violation.
+    "SP_ALLOWED_ORIGINS": "https://app.signalpilot.ai",
 }
 
 
