@@ -205,7 +205,7 @@ async def git_http_handler(project_id: str, remainder: str, request: Request):
     # v2 `command=fetch` body ("the remote end hung up unexpectedly"). Detect a v2
     # request from the body and set GIT_PROTOCOL=version=2 so the POST is handled
     # in the same protocol the client used to negotiate.
-    if "GIT_PROTOCOL" not in env and body[:64].lstrip(b"0123456789abcdef").startswith(b"command="):
+    if "GIT_PROTOCOL" not in env and b"command=" in body[:40]:
         env["GIT_PROTOCOL"] = "version=2"
 
     # 10. Execute git http-backend
