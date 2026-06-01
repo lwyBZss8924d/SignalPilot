@@ -199,6 +199,14 @@ async def git_http_handler(project_id: str, remainder: str, request: Request):
         # arbitrary client bytes into the CGI environment.
         if re.fullmatch(r"version=[0-9]+(:[A-Za-z0-9=_.-]+)*", git_protocol):
             env["GIT_PROTOCOL"] = git_protocol
+    # git sends `Git-Protocol: version=2` on the info/refs GET but NOT on the
+    # subsequent git-upload-pack POST. http-backend is stateless, so without
+    # GIT_PROTOCOL on the POST it runs upload-pack in v0 mode and chokes on the
+    # v2 `command=fetch` body ("the remote end hung up unexpectedly"). Detect a v2
+    # request from the body and set GIT_PROTOCOL=version=2 so the POST is handled
+    # in the same protocol the client used to negotiate.
+    if "GIT_PROTOCOL" not in env and body[:64].lstrip(b"0123456789abcdef").startswith(b"command="):
+        env["GIT_PROTOCOL"] = "version=2"
 
     # 10. Execute git http-backend
     try:
@@ -209,13 +217,11 @@ async def git_http_handler(project_id: str, remainder: str, request: Request):
             env=env,
             timeout=120,
         )
-        if proc.returncode != 0 or len(proc.stdout) == 0:
+        if proc.returncode != 0:
             logger.warning(
-                "git http-backend nonzero/empty: op=%s method=%s in_len=%d rc=%d out_len=%d proto=%s CL=%s body_head=%r err=%s",
-                remainder, request.method, len(body), proc.returncode,
-                len(proc.stdout), env.get("GIT_PROTOCOL", "v0"),
-                env.get("CONTENT_LENGTH"), body[:80],
-                proc.stderr.decode("utf-8", errors="replace")[:300],
+                "git http-backend failed: op=%s rc=%d err=%s",
+                remainder, proc.returncode,
+                proc.stderr.decode("utf-8", errors="replace")[:200],
             )
     except subprocess.TimeoutExpired:
         raise HTTPException(status_code=504, detail="Git operation timed out")
