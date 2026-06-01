@@ -227,13 +227,43 @@ async def run_notebook(
     if w_rc != 0:
         logger.warning("Failed to write %s to pod %s (rc=%d): %s", filename, pod_name, w_rc, w_err.strip())
 
-    # 6. Run sp export session — absolute path argv, no cd, no sh -c (F-4).
-    stdout, stderr, exit_code = await orch.exec_in_pod(
-        pod_name, org_id=org_id,
-        argv=["python", "-m", "signalpilot", "export", "session",
-              f"{project_dir}/{filename}", "--force-overwrite", "--verbose"],
-        timeout=300,
-    )
+    # 6. Run sp export session. The export runs as a fresh exec'd process (not the
+    # pod's `sp edit` server), so it doesn't inherit the kernel SP_API_KEY the
+    # server injects — the Data SDK (sp.init()) would have no gateway credential.
+    # Pass the MCP caller's own API key so the SDK authenticates as that caller.
+    # The key is read from STDIN by a constant wrapper (never argv — argv lands in
+    # the k8s control-plane audit log), which sets SP_API_KEY then exec's the real
+    # export; the export's kernel inherits SP_API_KEY via construct_kernel_env.
+    # The wrapper string is constant (no user-data interpolation) — F-4-safe.
+    from gateway.mcp.context import mcp_raw_key_var
+
+    mcp_key = mcp_raw_key_var.get(None)
+    export_target = f"{project_dir}/{filename}"
+    if mcp_key:
+        # standalone_mode default (True): Click calls sys.exit(code) so a failed
+        # export propagates a non-zero exit code to exec_in_pod, same as the
+        # `python -m signalpilot export` path below.
+        wrapper = (
+            "import os,sys;"
+            "os.environ['SP_API_KEY']=sys.stdin.readline().strip();"
+            "from signalpilot._cli.cli import main;"
+            "main(args=['export','session',"
+            f"{export_target!r},'--force-overwrite','--verbose'],prog_name='sp')"
+        )
+        stdout, stderr, exit_code = await orch.exec_in_pod(
+            pod_name, org_id=org_id,
+            argv=["python", "-c", wrapper],
+            stdin_bytes=(mcp_key + "\n").encode("utf-8"),
+            timeout=300,
+        )
+    else:
+        # Local mode (no MCP key) — gateway needs no credential.
+        stdout, stderr, exit_code = await orch.exec_in_pod(
+            pod_name, org_id=org_id,
+            argv=["python", "-m", "signalpilot", "export", "session",
+                  export_target, "--force-overwrite", "--verbose"],
+            timeout=300,
+        )
 
     # 7. Read session JSON from pod to extract cell outputs
     cell_outputs = ""
