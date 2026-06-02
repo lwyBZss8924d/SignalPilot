@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import json
@@ -7,6 +8,7 @@ from urllib.parse import parse_qs, urlparse
 
 import pytest
 
+from gateway.api import notion as notion_api
 from gateway.db.models import NotionInstallation, NotionInstallationConfig
 from gateway.notion import client as notion_client
 from gateway.notion import webhooks as notion_webhooks
@@ -39,6 +41,52 @@ def test_webhook_signature_validation_rejects_invalid_signature() -> None:
 
     with pytest.raises(notion_webhooks.InvalidNotionSignature):
         notion_webhooks.verify_notion_signature(body, "sha256=bad", "secret_test")
+
+
+def test_oauth_redirect_rejects_external_hosts(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SIGNALPILOT_WEB_URL", "https://app.signalpilot.ai")
+
+    redirect_url = notion_api._safe_redirect_url(
+        "https://evil.test/integrations",
+        installation_id="install-1",
+    )
+    parsed = urlparse(redirect_url)
+    params = parse_qs(parsed.query)
+
+    assert f"{parsed.scheme}://{parsed.netloc}{parsed.path}" == "https://app.signalpilot.ai/integrations"
+    assert params["notion"] == ["connected"]
+    assert params["installation_id"] == ["install-1"]
+
+
+def test_oauth_redirect_allows_configured_frontend_origin(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SP_ALLOWED_ORIGINS", "https://preview.signalpilot.ai")
+
+    redirect_url = notion_api._safe_redirect_url("https://preview.signalpilot.ai/integrations?tab=notion")
+    parsed = urlparse(redirect_url)
+    params = parse_qs(parsed.query)
+
+    assert f"{parsed.scheme}://{parsed.netloc}{parsed.path}" == "https://preview.signalpilot.ai/integrations"
+    assert params["tab"] == ["notion"]
+    assert params["notion"] == ["connected"]
+
+
+@pytest.mark.asyncio
+async def test_webhook_background_task_logs_unhandled_exception(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    async def fail_unhandled(*_args, **_kwargs) -> None:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(notion_api, "_process_notion_event_task", fail_unhandled)
+
+    with caplog.at_level("ERROR", logger="gateway.api.notion"):
+        notion_api._schedule_notion_event_processing("evt-1", "install-1", {})
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+    assert "Unhandled Notion webhook processing task failure" in caplog.text
+    assert "evt-1" in caplog.text
 
 
 def test_comment_page_mention_matches_trigger_page_id() -> None:

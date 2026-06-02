@@ -16,8 +16,8 @@ import time
 import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
-from urllib.error import HTTPError, URLError
 
+import httpx
 from starlette.responses import JSONResponse
 
 from signalpilot._server.auth.session_token import load_session_jwt
@@ -697,9 +697,7 @@ def _local_list_messages(
     return {"messages": [_message_row(row) for row in rows]}
 
 
-def _gw(method: str, path: str, body: dict[str, Any] | None = None) -> Any:
-    from urllib.request import Request as Req, urlopen
-
+async def _gw(method: str, path: str, body: dict[str, Any] | None = None) -> Any:
     if not _USE_GATEWAY:
         return {
             "_error": True,
@@ -708,22 +706,27 @@ def _gw(method: str, path: str, body: dict[str, Any] | None = None) -> Any:
         }
 
     url = f"{_GATEWAY_URL}{path}"
-    data = json.dumps(body).encode() if body else None
-    req = Req(url, data=data, method=method)
-    req.add_header("Content-Type", "application/json")
+    headers = {"Content-Type": "application/json"}
     if _SESSION_JWT:
-        req.add_header("Authorization", f"Bearer {_SESSION_JWT}")
+        headers["Authorization"] = f"Bearer {_SESSION_JWT}"
     elif _API_KEY:
-        req.add_header("Authorization", f"Bearer {_API_KEY}")
+        headers["Authorization"] = f"Bearer {_API_KEY}"
     try:
-        with urlopen(req, timeout=15) as resp:
-            raw = resp.read()
-            return json.loads(raw) if raw else None
-    except HTTPError as e:
-        detail = e.read().decode("utf-8", errors="replace")[:500]
-        return {"_error": True, "status": e.code, "detail": detail}
-    except URLError as e:
-        return {"_error": True, "status": 502, "detail": str(e)}
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            response = await client.request(method, url, json=body if body else None, headers=headers)
+    except httpx.TimeoutException as exc:
+        return {"_error": True, "status": 504, "detail": str(exc)}
+    except httpx.HTTPError as exc:
+        return {"_error": True, "status": 502, "detail": str(exc)}
+
+    if response.status_code >= 400:
+        return {"_error": True, "status": response.status_code, "detail": response.text[:500]}
+    if not response.content:
+        return None
+    try:
+        return response.json()
+    except json.JSONDecodeError:
+        return response.text
 
 
 def _respond(result: Any) -> JSONResponse:
@@ -741,7 +744,7 @@ def _respond(result: Any) -> JSONResponse:
 @router.post("/conversations")
 async def create_conversation(request: Request) -> JSONResponse:
     body = await request.json()
-    result = _gw("POST", "/api/chat/conversations", body)
+    result = await _gw("POST", "/api/chat/conversations", body)
     if isinstance(result, dict) and result.get("_error"):
         return JSONResponse(_local_create_conversation(request, body))
     return _respond(result)
@@ -762,7 +765,7 @@ async def list_conversations(request: Request) -> JSONResponse:
         from urllib.parse import urlencode
 
         qs = "?" + urlencode(params)
-    result = _gw("GET", f"/api/chat/conversations{qs}")
+    result = await _gw("GET", f"/api/chat/conversations{qs}")
     if isinstance(result, dict) and result.get("_error"):
         local = _local_list_conversations(request)
         if local.get("conversations"):
@@ -786,7 +789,7 @@ async def get_conversation(request: Request) -> JSONResponse:
     if traced is not None:
         return JSONResponse(traced)
 
-    result = _gw("GET", f"/api/chat/conversations/{cid}")
+    result = await _gw("GET", f"/api/chat/conversations/{cid}")
     if isinstance(result, dict) and result.get("_error"):
         return JSONResponse(_local_get_conversation(request, cid))
     return _respond(result)
@@ -795,7 +798,7 @@ async def get_conversation(request: Request) -> JSONResponse:
 @router.delete("/conversations/{conversation_id}")
 async def delete_conversation(request: Request) -> JSONResponse:
     cid = request.path_params["conversation_id"]
-    result = _gw("DELETE", f"/api/chat/conversations/{cid}")
+    result = await _gw("DELETE", f"/api/chat/conversations/{cid}")
     if isinstance(result, dict) and result.get("_error"):
         return JSONResponse(_local_delete_conversation(request, cid))
     return _respond(result)
@@ -808,7 +811,7 @@ async def delete_conversation(request: Request) -> JSONResponse:
 async def append_message(request: Request) -> JSONResponse:
     cid = request.path_params["conversation_id"]
     body = await request.json()
-    result = _gw("POST", f"/api/chat/conversations/{cid}/messages", body)
+    result = await _gw("POST", f"/api/chat/conversations/{cid}/messages", body)
     if isinstance(result, dict) and result.get("_error"):
         return JSONResponse(_local_append_message(request, cid, body))
     return _respond(result)
@@ -823,7 +826,7 @@ async def list_messages(request: Request) -> JSONResponse:
         from urllib.parse import urlencode
 
         qs = "?" + urlencode(params)
-    result = _gw("GET", f"/api/chat/conversations/{cid}/messages{qs}")
+    result = await _gw("GET", f"/api/chat/conversations/{cid}/messages{qs}")
     if isinstance(result, dict) and result.get("_error"):
         return JSONResponse(_local_list_messages(request, cid))
     return _respond(result)

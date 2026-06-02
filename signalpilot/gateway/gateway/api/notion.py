@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
-from urllib.parse import urlencode, urlparse
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -36,6 +37,8 @@ from gateway.store import notion as notion_store
 
 router = APIRouter(prefix="/api/integrations/notion")
 webhook_router = APIRouter(prefix="/api/notion")
+logger = logging.getLogger(__name__)
+_notion_event_tasks: set[asyncio.Task[None]] = set()
 
 
 def _notion_oauth_client_id() -> str:
@@ -63,17 +66,66 @@ def _webhook_verification_token() -> str:
     return value
 
 
-def _safe_redirect_url(value: str | None, installation_id: str | None = None, status: str = "connected") -> str:
-    fallback = os.getenv("SIGNALPILOT_WEB_URL") or os.getenv("SP_WEB_URL") or "/integrations"
-    target = value or fallback
+def _redirect_fallback_url() -> str:
+    web_url = os.getenv("SIGNALPILOT_WEB_URL") or os.getenv("SP_WEB_URL")
+    if web_url:
+        return f"{web_url.rstrip('/')}/integrations"
+    return "/integrations"
+
+
+def _origin_for_url(value: str) -> str | None:
+    parsed = urlparse(value)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return None
+    return f"{parsed.scheme.lower()}://{parsed.netloc.lower()}"
+
+
+def _allowed_redirect_origins() -> set[str]:
+    origins: set[str] = set()
+    for value in (os.getenv("SIGNALPILOT_WEB_URL"), os.getenv("SP_WEB_URL")):
+        if value and (origin := _origin_for_url(value)):
+            origins.add(origin)
+    for value in (os.getenv("SP_ALLOWED_ORIGINS") or "").split(","):
+        if value and (origin := _origin_for_url(value.strip())):
+            origins.add(origin)
+    if not origins:
+        origins.update(
+            {
+                "http://localhost:3000",
+                "http://localhost:3200",
+                "http://localhost:3210",
+                "http://127.0.0.1:3000",
+                "http://127.0.0.1:3200",
+                "http://127.0.0.1:3210",
+            }
+        )
+    return origins
+
+
+def _is_safe_redirect_target(target: str) -> bool:
+    if not target or target.startswith(("//", "\\")):
+        return False
     parsed = urlparse(target)
-    if parsed.scheme and parsed.scheme not in ("http", "https"):
-        target = fallback
-    separator = "&" if "?" in target else "?"
+    if not parsed.scheme and not parsed.netloc:
+        return target.startswith("/")
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return False
+    return _origin_for_url(target) in _allowed_redirect_origins()
+
+
+def _safe_redirect_url(value: str | None, installation_id: str | None = None, status: str = "connected") -> str:
+    fallback = _redirect_fallback_url()
+    target = value or fallback
+    if not _is_safe_redirect_target(target):
+        target = fallback if _is_safe_redirect_target(fallback) else "/integrations"
+
+    parsed = urlparse(target)
     params = {"notion": status}
     if installation_id:
         params["installation_id"] = installation_id
-    return f"{target}{separator}{urlencode(params)}"
+    query = parse_qsl(parsed.query, keep_blank_values=True)
+    query.extend(params.items())
+    return urlunparse(parsed._replace(query=urlencode(query)))
 
 
 async def _refresh_installation_token(store: Store, installation_id: str) -> str | None:
@@ -173,6 +225,29 @@ async def _process_notion_event_task(event_id: str, installation_id: str, payloa
             org_id=installation.org_id,
             processed=True,
         )
+
+
+def _handle_notion_event_task_done(event_id: str, task: asyncio.Task[None]) -> None:
+    _notion_event_tasks.discard(task)
+    try:
+        task.result()
+    except asyncio.CancelledError:
+        logger.warning("Notion webhook processing task cancelled (event_id=%s)", event_id)
+    except Exception as exc:
+        logger.error(
+            "Unhandled Notion webhook processing task failure (event_id=%s)",
+            event_id,
+            exc_info=(type(exc), exc, exc.__traceback__),
+        )
+
+
+def _schedule_notion_event_processing(event_id: str, installation_id: str, payload: dict) -> None:
+    task = asyncio.create_task(
+        _process_notion_event_task(event_id, installation_id, payload),
+        name=f"notion-webhook-{event_id}",
+    )
+    _notion_event_tasks.add(task)
+    task.add_done_callback(lambda completed: _handle_notion_event_task_done(event_id, completed))
 
 
 @router.get("/oauth/start", dependencies=[RequireScope("write")])
@@ -444,5 +519,5 @@ async def receive_notion_webhook(
         installation_id=routed.installation.id,
         org_id=routed.installation.org_id,
     )
-    asyncio.create_task(_process_notion_event_task(str(event_id), routed.installation.id, payload))
+    _schedule_notion_event_processing(str(event_id), routed.installation.id, payload)
     return NotionWebhookResponse(status="queued", event_id=str(event_id))
