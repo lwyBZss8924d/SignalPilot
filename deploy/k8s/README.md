@@ -14,7 +14,7 @@ sandboxed notebook pods to Kubernetes. All manifests live alongside this file:
 
 Both tracks require, in order: a NetworkPolicy-enforcing CNI (a), the gateway
 RBAC (b), a sandbox RuntimeClass (c), the gateway env vars (d), IMDS hardening
-(e), the pod PID limit (h), and the admission policies (j).
+(e), the pod PID limit (h), and the admission policies (i).
 
 ## Workspace storage
 
@@ -282,38 +282,7 @@ kubectl get --raw "/api/v1/nodes/$NODE/proxy/configz" | jq '.kubeletconfig.podPi
 
 - [ ] kubelet `podPidsLimit=4096` configured on every node.
 
-### (i) Master key rotation
-
-When rotating `SP_ENCRYPTION_KEY`:
-
-1. Generate a new Fernet key:
-   ```bash
-   python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
-   ```
-
-2. Set `SP_ENCRYPTION_KEY=<new-key>` and `SP_ENCRYPTION_KEY_OLD=<previous-key>`.
-   Rolling restart the gateway. The old key stays active for decryption.
-
-3. Reads automatically re-encrypt rows under the new primary key via
-   `needs_migration=True` — this covers `connections`, `user_secrets`, and
-   `github_credentials` (all three C1 callsites routed through
-   `_decrypt_with_migration`).
-
-4. **HARD PRECONDITION before step 5:** EITHER:
-   - (a) The bake period exceeds the maximum row lifetime AND a query confirms
-     zero rows have ciphertext older than the rotation epoch, OR
-   - (b) Run the admin re-encrypt task: `python -m gateway.admin.reencrypt_all`
-     *(planned — not required if routine reads cover all rows during bake period)*.
-
-   **Dropping `SP_ENCRYPTION_KEY_OLD` before all rows are migrated will
-   permanently lose access to tokens encrypted under the old key.**
-
-5. Drop `SP_ENCRYPTION_KEY_OLD` and rolling restart.
-
-**Old key cap:** Maximum 8 entries in `SP_ENCRYPTION_KEY_OLD` (comma-separated).
-Exceeding this limit raises a hard error at startup.
-
-### (j) Admission policies (defense-in-depth)
+### (i) Admission policies (defense-in-depth)
 
 The `admission/` directory holds cluster admission policies that backstop the RBAC
 and runtime controls. Apply them on any multi-tenant cluster:
@@ -335,6 +304,6 @@ kubectl apply -f deploy/k8s/admission/restrict-pod-exec-validatingadmissionpolic
 # (or the *-kyverno.yaml variants if you run Kyverno)
 ```
 
-At the application boundary this is reinforced: only `orchestrator/pod_exec_io.py`
-issues `pods/exec` (enforced by a CI AST test) and the container name is hardcoded
-to `notebook`. See `admission/README.md` for the policy test suite.
+At the application boundary this is reinforced: the gateway issues `pods/exec` only
+against the `notebook` container, never an operator-supplied name. See
+`admission/README.md` for the policy test suite.
