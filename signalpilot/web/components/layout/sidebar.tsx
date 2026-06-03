@@ -147,6 +147,10 @@ const nav: { href: string; label: string; icon: NavIconComponent; shortcut: stri
 /** Routes where the sidebar should be hidden (auth + onboarding = locked flow) */
 const HIDDEN_SIDEBAR_PREFIXES = ["/sign-in", "/sign-up", "/onboarding", "/notebook"];
 
+function matchesRoutePrefix(pathname: string, prefix: string) {
+  return pathname === prefix || pathname.startsWith(`${prefix}/`);
+}
+
 function SignalPilotLogo() {
   return (
     /* eslint-disable-next-line @next/next/no-img-element */
@@ -464,7 +468,7 @@ export default function Sidebar() {
   const tierBranding = useTierBranding();
   const showWordmark = tierBranding.enabled && tierBranding.tier !== "free";
 
-  if (HIDDEN_SIDEBAR_PREFIXES.some((prefix) => pathname.startsWith(prefix))) {
+  if (HIDDEN_SIDEBAR_PREFIXES.some((prefix) => matchesRoutePrefix(pathname, prefix))) {
     return null;
   }
 

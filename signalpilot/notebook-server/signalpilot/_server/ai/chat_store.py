@@ -1,15 +1,20 @@
 # Copyright 2026 SignalPilot. All rights reserved.
-"""Durable storage for agent chat traces."""
+"""Gateway-backed storage for agent chat traces."""
 
 from __future__ import annotations
 
 import json
-import sqlite3
-from dataclasses import dataclass
+import os
+from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
-from signalpilot._server.api.deps import AppStateBase
+import httpx
+
+from signalpilot._server.auth.session_token import load_session_jwt
+
+if TYPE_CHECKING:
+    from signalpilot._server.api.deps import AppStateBase
 
 ChatSource = Literal["user", "notion"]
 ThreadStatus = Literal["active", "done", "failed"]
@@ -28,7 +33,12 @@ class ChatThread:
     metadata: dict[str, Any] | None = None
 
 
-def chat_store_path_for_app(app_state: AppStateBase) -> Path:
+def local_chat_db_path_for_app(app_state: AppStateBase) -> Path:
+    """Return the local chat endpoint DB path.
+
+    Trace persistence does not use this path; traces are persisted through the
+    gateway API.
+    """
     workspace = app_state.session_manager.workspace
     root = workspace.directory
     if root is None:
@@ -39,292 +49,237 @@ def chat_store_path_for_app(app_state: AppStateBase) -> Path:
     return root_path / "__sp__" / "chat.sqlite"
 
 
-def _dumps(value: Any) -> str | None:
+def _gateway_auth_token() -> str:
+    return load_session_jwt() or os.environ.get("SP_API_KEY", "").strip()
+
+
+def _optional_str(value: Any) -> str:
     if value is None:
-        return None
-    return json.dumps(value, sort_keys=True, default=str)
+        return ""
+    if isinstance(value, str):
+        return value
+    return str(value)
 
 
-def _loads(value: str | None, default: Any) -> Any:
-    if not value:
-        return default
+def _trace_event_body(
+    event: dict[str, Any], metadata: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    body = dict(event)
+    body["content"] = _optional_str(body.get("content"))
+    body["tool_name"] = _optional_str(body.get("tool_name"))
+    body["tool_call_id"] = _optional_str(body.get("tool_call_id"))
+    body["is_error"] = bool(body.get("is_error"))
     try:
-        return json.loads(value)
-    except json.JSONDecodeError:
-        return default
+        body["turn"] = int(body.get("turn") or 0)
+    except (TypeError, ValueError):
+        body["turn"] = 0
+    if metadata is not None:
+        body["metadata"] = metadata
+    return body
 
 
-class ChatTraceStore:
-    def __init__(self, db_path: Path | str) -> None:
-        self.db_path = Path(db_path)
+class GatewayTraceError(Exception):
+    """Gateway trace API failed."""
 
-    def _connect(self) -> sqlite3.Connection:
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(self.db_path)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA foreign_keys=ON")
-        self._ensure_schema(conn)
-        return conn
 
-    def _ensure_schema(self, conn: sqlite3.Connection) -> None:
-        conn.executescript(
-            """
-            CREATE TABLE IF NOT EXISTS chat_threads (
-                thread_id TEXT PRIMARY KEY,
-                session_id TEXT NOT NULL,
-                source TEXT NOT NULL,
-                title TEXT NOT NULL DEFAULT '',
-                status TEXT NOT NULL DEFAULT 'active',
-                notebook_path TEXT NOT NULL DEFAULT '',
-                notion_request_page_id TEXT,
-                notion_discussion_id TEXT,
-                created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-                updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-                metadata_json TEXT
-            );
+class GatewayTraceNotFound(GatewayTraceError):
+    """Gateway trace API returned 404."""
 
-            CREATE TABLE IF NOT EXISTS chat_events (
-                thread_id TEXT NOT NULL,
-                idx INTEGER NOT NULL,
-                event_type TEXT NOT NULL,
-                role TEXT,
-                content TEXT NOT NULL DEFAULT '',
-                tool_name TEXT NOT NULL DEFAULT '',
-                tool_input_json TEXT,
-                tool_call_id TEXT NOT NULL DEFAULT '',
-                is_error INTEGER NOT NULL DEFAULT 0,
-                cost_usd REAL,
-                turn INTEGER NOT NULL DEFAULT 0,
-                created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-                metadata_json TEXT,
-                PRIMARY KEY (thread_id, idx),
-                FOREIGN KEY (thread_id) REFERENCES chat_threads(thread_id) ON DELETE CASCADE
-            );
 
-            CREATE INDEX IF NOT EXISTS idx_chat_threads_session
-                ON chat_threads(session_id);
-            CREATE INDEX IF NOT EXISTS idx_chat_events_thread_idx
-                ON chat_events(thread_id, idx);
-            """
+class GatewayChatTraceClient:
+    """Async client for gateway-owned chat trace persistence."""
+
+    def __init__(
+        self,
+        *,
+        base_url: str | None = None,
+        auth_token: str | None = None,
+        timeout: float = 15.0,
+    ) -> None:
+        self.base_url = (
+            base_url
+            or os.environ.get("SP_GATEWAY_URL", "http://localhost:3300")
+        ).rstrip("/")
+        self.auth_token = auth_token if auth_token is not None else _gateway_auth_token()
+        self.timeout = timeout
+
+    @classmethod
+    def from_env(cls) -> GatewayChatTraceClient:
+        token = _gateway_auth_token()
+        if not token:
+            raise GatewayTraceError(
+                "Gateway chat trace persistence requires a notebook session JWT or SP_API_KEY"
+            )
+        return cls(auth_token=token)
+
+    def _headers(self) -> dict[str, str]:
+        headers = {"Content-Type": "application/json"}
+        if self.auth_token:
+            headers["Authorization"] = f"Bearer {self.auth_token}"
+        return headers
+
+    async def _request(
+        self,
+        method: str,
+        path: str,
+        *,
+        body: dict[str, Any] | None = None,
+        params: dict[str, Any] | None = None,
+    ) -> Any:
+        url = f"{self.base_url}{path}"
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                response = await client.request(
+                    method,
+                    url,
+                    json=body,
+                    params=params,
+                    headers=self._headers(),
+                )
+        except httpx.HTTPError as exc:
+            raise GatewayTraceError(str(exc)) from exc
+
+        if response.status_code == 404:
+            raise GatewayTraceNotFound(response.text[:500])
+        if response.status_code >= 400:
+            raise GatewayTraceError(
+                f"Gateway trace API returned {response.status_code}: "
+                f"{response.text[:500]}"
+            )
+        if not response.content:
+            return None
+        try:
+            return response.json()
+        except json.JSONDecodeError as exc:
+            raise GatewayTraceError("Gateway trace API returned non-JSON") from exc
+
+    async def upsert_thread(self, thread: ChatThread) -> dict[str, Any]:
+        return await self._request(
+            "POST",
+            "/api/chat/traces/threads",
+            body=asdict(thread),
         )
 
-    def upsert_thread(self, thread: ChatThread) -> None:
-        with self._connect() as conn:
-            conn.execute(
-                """
-                INSERT INTO chat_threads (
-                    thread_id, session_id, source, title, status, notebook_path,
-                    notion_request_page_id, notion_discussion_id, metadata_json
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(thread_id) DO UPDATE SET
-                    session_id = excluded.session_id,
-                    source = excluded.source,
-                    title = CASE
-                        WHEN excluded.title != '' THEN excluded.title
-                        ELSE chat_threads.title
-                    END,
-                    status = excluded.status,
-                    notebook_path = CASE
-                        WHEN excluded.notebook_path != '' THEN excluded.notebook_path
-                        ELSE chat_threads.notebook_path
-                    END,
-                    notion_request_page_id = COALESCE(
-                        excluded.notion_request_page_id,
-                        chat_threads.notion_request_page_id
-                    ),
-                    notion_discussion_id = COALESCE(
-                        excluded.notion_discussion_id,
-                        chat_threads.notion_discussion_id
-                    ),
-                    metadata_json = COALESCE(
-                        excluded.metadata_json,
-                        chat_threads.metadata_json
-                    ),
-                    updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-                """,
-                (
-                    thread.thread_id,
-                    thread.session_id,
-                    thread.source,
-                    thread.title,
-                    thread.status,
-                    thread.notebook_path,
-                    thread.notion_request_page_id,
-                    thread.notion_discussion_id,
-                    _dumps(thread.metadata),
-                ),
-            )
+    async def clear_events(self, thread_id: str) -> None:
+        await self._request(
+            "DELETE", f"/api/chat/traces/threads/{thread_id}/events"
+        )
 
-    def clear_events(self, thread_id: str) -> None:
-        with self._connect() as conn:
-            conn.execute("DELETE FROM chat_events WHERE thread_id = ?", (thread_id,))
-            conn.execute(
-                """
-                UPDATE chat_threads
-                SET updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-                WHERE thread_id = ?
-                """,
-                (thread_id,),
-            )
-
-    def append_event(
+    async def append_event(
         self,
         thread_id: str,
         event: dict[str, Any],
         *,
         metadata: dict[str, Any] | None = None,
     ) -> int:
-        with self._connect() as conn:
-            conn.execute("BEGIN IMMEDIATE")
-            row = conn.execute(
-                "SELECT COALESCE(MAX(idx), -1) + 1 AS next_idx "
-                "FROM chat_events WHERE thread_id = ?",
-                (thread_id,),
-            ).fetchone()
-            idx = int(row["next_idx"])
-            conn.execute(
-                """
-                INSERT INTO chat_events (
-                    thread_id, idx, event_type, role, content, tool_name,
-                    tool_input_json, tool_call_id, is_error, cost_usd, turn,
-                    metadata_json
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    thread_id,
-                    idx,
-                    str(event.get("type", "")),
-                    event.get("role"),
-                    str(event.get("content", "") or ""),
-                    str(event.get("tool_name", "") or ""),
-                    _dumps(event.get("tool_input")),
-                    str(event.get("tool_call_id", "") or ""),
-                    1 if event.get("is_error") else 0,
-                    event.get("cost_usd"),
-                    int(event.get("turn", 0) or 0),
-                    _dumps(metadata or event.get("metadata")),
-                ),
-            )
-            conn.execute(
-                """
-                UPDATE chat_threads
-                SET updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-                WHERE thread_id = ?
-                """,
-                (thread_id,),
-            )
-            return idx
+        body = _trace_event_body(event, metadata)
+        result = await self._request(
+            "POST",
+            f"/api/chat/traces/threads/{thread_id}/events",
+            body=body,
+        )
+        if not isinstance(result, dict) or "idx" not in result:
+            raise GatewayTraceError("Gateway trace append did not return idx")
+        return int(result["idx"])
 
-    def get_events(
+    async def get_events(
         self, thread_id: str, after_index: int = -1
     ) -> list[dict[str, Any]]:
-        with self._connect() as conn:
-            rows = conn.execute(
-                """
-                SELECT idx, event_type, role, content, tool_name,
-                    tool_input_json, tool_call_id, is_error, cost_usd, turn,
-                    metadata_json, created_at
-                FROM chat_events
-                WHERE thread_id = ? AND idx > ?
-                ORDER BY idx ASC
-                """,
-                (thread_id, after_index),
-            ).fetchall()
+        result = await self._request(
+            "GET",
+            f"/api/chat/traces/threads/{thread_id}/events",
+            params={"after_index": after_index},
+        )
+        if isinstance(result, dict) and isinstance(result.get("events"), list):
+            return result["events"]
+        raise GatewayTraceError("Gateway trace event list returned invalid body")
 
-        events: list[dict[str, Any]] = []
-        for row in rows:
-            event = {
-                "idx": row["idx"],
-                "type": row["event_type"],
-                "content": row["content"],
-                "tool_name": row["tool_name"],
-                "tool_input": _loads(row["tool_input_json"], None),
-                "tool_call_id": row["tool_call_id"],
-                "is_error": bool(row["is_error"]),
-                "cost_usd": row["cost_usd"],
-                "turn": row["turn"],
-                "created_at": row["created_at"],
-            }
-            if row["role"]:
-                event["role"] = row["role"]
-            metadata = _loads(row["metadata_json"], None)
-            if metadata is not None:
-                event["metadata"] = metadata
-            events.append(event)
-        return events
+    async def list_threads(self, session_id: str) -> list[dict[str, Any]]:
+        result = await self._request(
+            "GET",
+            "/api/chat/traces/threads",
+            params={"session_id": session_id},
+        )
+        if isinstance(result, dict) and isinstance(result.get("threads"), list):
+            return result["threads"]
+        raise GatewayTraceError("Gateway trace thread list returned invalid body")
 
-    def list_threads(self, session_id: str) -> list[dict[str, Any]]:
-        with self._connect() as conn:
-            rows = conn.execute(
-                """
-                SELECT thread_id, session_id, source, title, status,
-                    notebook_path, notion_request_page_id,
-                    notion_discussion_id, created_at, updated_at,
-                    metadata_json
-                FROM chat_threads
-                WHERE session_id = ?
-                ORDER BY updated_at DESC
-                LIMIT 100
-                """,
-                (session_id,),
-            ).fetchall()
-        return [self._thread_row(row) for row in rows]
-
-    def list_threads_by_source(
+    async def list_threads_by_source(
         self, source: ChatSource, limit: int = 100
     ) -> list[dict[str, Any]]:
-        with self._connect() as conn:
-            rows = conn.execute(
-                """
-                SELECT thread_id, session_id, source, title, status,
-                    notebook_path, notion_request_page_id,
-                    notion_discussion_id, created_at, updated_at,
-                    metadata_json
-                FROM chat_threads
-                WHERE source = ?
-                ORDER BY updated_at DESC
-                LIMIT ?
-                """,
-                (source, limit),
-            ).fetchall()
-        return [self._thread_row(row) for row in rows]
+        result = await self._request(
+            "GET",
+            "/api/chat/traces/threads",
+            params={"source": source, "limit": limit},
+        )
+        if isinstance(result, dict) and isinstance(result.get("threads"), list):
+            return result["threads"]
+        raise GatewayTraceError("Gateway trace thread source list returned invalid body")
 
-    def get_thread(self, thread_id: str) -> dict[str, Any] | None:
-        with self._connect() as conn:
-            row = conn.execute(
-                """
-                SELECT thread_id, session_id, source, title, status,
-                    notebook_path, notion_request_page_id,
-                    notion_discussion_id, created_at, updated_at,
-                    metadata_json
-                FROM chat_threads
-                WHERE thread_id = ?
-                """,
-                (thread_id,),
-            ).fetchone()
-        if row is None:
+    async def get_thread(self, thread_id: str) -> dict[str, Any] | None:
+        try:
+            result = await self._request(
+                "GET", f"/api/chat/traces/threads/{thread_id}"
+            )
+        except GatewayTraceNotFound:
             return None
-        return self._thread_row(row)
-
-    @staticmethod
-    def _thread_row(row: sqlite3.Row) -> dict[str, Any]:
-        return {
-            "thread_id": row["thread_id"],
-            "session_id": row["session_id"],
-            "source": row["source"],
-            "title": row["title"],
-            "status": row["status"],
-            "notebook_path": row["notebook_path"],
-            "notion_request_page_id": row["notion_request_page_id"],
-            "notion_discussion_id": row["notion_discussion_id"],
-            "created_at": row["created_at"],
-            "updated_at": row["updated_at"],
-            "metadata": _loads(row["metadata_json"], {}),
-        }
+        if isinstance(result, dict):
+            return result
+        raise GatewayTraceError("Gateway trace thread get returned invalid body")
 
 
-def get_chat_trace_store(db_path: Path | str) -> ChatTraceStore:
-    return ChatTraceStore(db_path)
+class GatewayChatTraceStore:
+    """Gateway-only trace store."""
+
+    def __init__(
+        self,
+        *,
+        gateway_client: GatewayChatTraceClient | None = None,
+        use_env_gateway: bool = True,
+    ) -> None:
+        self.gateway_client = (
+            GatewayChatTraceClient.from_env()
+            if gateway_client is None and use_env_gateway
+            else gateway_client
+        )
+        if self.gateway_client is None:
+            raise GatewayTraceError(
+                "Gateway chat trace persistence requires a GatewayChatTraceClient"
+            )
+
+    async def upsert_thread(self, thread: ChatThread) -> None:
+        await self.gateway_client.upsert_thread(thread)
+
+    async def clear_events(self, thread_id: str) -> None:
+        await self.gateway_client.clear_events(thread_id)
+
+    async def append_event(
+        self,
+        thread_id: str,
+        event: dict[str, Any],
+        *,
+        metadata: dict[str, Any] | None = None,
+    ) -> int:
+        return await self.gateway_client.append_event(
+            thread_id, event, metadata=metadata
+        )
+
+    async def get_events(
+        self, thread_id: str, after_index: int = -1
+    ) -> list[dict[str, Any]]:
+        return await self.gateway_client.get_events(thread_id, after_index)
+
+    async def list_threads(self, session_id: str) -> list[dict[str, Any]]:
+        return await self.gateway_client.list_threads(session_id)
+
+    async def list_threads_by_source(
+        self, source: ChatSource, limit: int = 100
+    ) -> list[dict[str, Any]]:
+        return await self.gateway_client.list_threads_by_source(source, limit)
+
+    async def get_thread(self, thread_id: str) -> dict[str, Any] | None:
+        return await self.gateway_client.get_thread(thread_id)
+
+
+def get_gateway_chat_trace_store() -> GatewayChatTraceStore:
+    return GatewayChatTraceStore()

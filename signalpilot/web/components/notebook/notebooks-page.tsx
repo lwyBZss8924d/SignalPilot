@@ -62,6 +62,17 @@ type NotionConversation = {
   updated_at?: number;
 };
 
+type ChatTraceThread = {
+  thread_id: string;
+  session_id: string;
+  title?: string;
+  source?: string;
+  status?: string;
+  notebook_path?: string;
+  created_at?: number;
+  updated_at?: number;
+};
+
 const BOOT_PHASE_LABELS: Record<string, string> = {
   health: "connecting to runtime...",
   sessions: "preparing workspace...",
@@ -101,7 +112,7 @@ export default function NotebooksPage() {
   const [state, setState] = useState<AppState>("loading");
   const [launchStatus, setLaunchStatus] = useState(hasDeepLink ? "connecting to pod..." : "");
   const [notebookConfig, setNotebookConfig] = useState<NotebookConfig | null>(null);
-  const [activeNotebookSession, setActiveNotebookSession] =
+  const [, setActiveNotebookSession] =
     useState<NotebookSession | null>(null);
   const [notionConversations, setNotionConversations] = useState<
     NotionConversation[]
@@ -246,9 +257,29 @@ export default function NotebooksPage() {
     restoreMissingNotionSessionInUrl();
   }, [urlFile, urlSessionId]);
 
-  async function resolveNotionThreadId(
-    sessionId: string,
-  ): Promise<string | undefined> {
+  function toNotionConversation(thread: ChatTraceThread): NotionConversation {
+    return {
+      id: thread.thread_id,
+      title: thread.title || "Notion analysis",
+      source: thread.source,
+      status: thread.status,
+      notebook_path: thread.notebook_path,
+      created_at: thread.created_at,
+      updated_at: thread.updated_at,
+    };
+  }
+
+  async function fetchNotionTraceThreads() {
+    const token = await getGatewayAuthToken();
+    const headers: Record<string, string> = {};
+    if (token) headers.Authorization = `Bearer ${token}`;
+
+    return fetch(`${GATEWAY_URL}/api/chat/traces/threads?source=notion`, {
+      headers,
+    });
+  }
+
+  async function resolveNotionThreadId(): Promise<string | undefined> {
     if (urlSessionId.startsWith("session-notion-")) {
       return urlSessionId;
     }
@@ -256,28 +287,23 @@ export default function NotebooksPage() {
       return undefined;
     }
 
-    const token = await getGatewayAuthToken();
-    const headers: Record<string, string> = {};
-    if (token) headers.Authorization = `Bearer ${token}`;
-
     try {
-      const resp = await fetch(
-        `${GATEWAY_URL}/notebook/${sessionId}/api/chat/conversations?source=notion`,
-        { headers },
-      );
+      const resp = await fetchNotionTraceThreads();
       if (!resp.ok) {return undefined;}
       const data = (await resp.json()) as {
-        conversations?: NotionConversation[];
+        threads?: ChatTraceThread[];
       };
-      const match = (data.conversations ?? []).find((conversation) => {
-        const notebookPath = conversation.notebook_path || "";
+      const match = (data.threads ?? []).find((thread) => {
+        const notebookPath = thread.notebook_path || "";
         return (
           notebookPath === urlFile ||
           notebookPath.endsWith(`/${urlFile}`) ||
           urlFile.endsWith(notebookPath)
         );
       });
-      return match?.id?.startsWith("session-notion-") ? match.id : undefined;
+      return match?.thread_id?.startsWith("session-notion-")
+        ? match.thread_id
+        : undefined;
     } catch (err) {
       console.warn("Failed to resolve Notion thread for notebook file:", err);
       return undefined;
@@ -285,7 +311,7 @@ export default function NotebooksPage() {
   }
 
   async function buildConfig(sessionId: string, apiKey?: string): Promise<NotebookConfig> {
-    const kernelSessionId = await resolveNotionThreadId(sessionId);
+    const kernelSessionId = await resolveNotionThreadId();
     rememberResolvedNotionThread(kernelSessionId);
     preserveResolvedNotionSessionInUrl(kernelSessionId);
     primeNotionTrailChrome(kernelSessionId);
@@ -302,66 +328,19 @@ export default function NotebooksPage() {
     };
   }
 
-  async function ensureOverviewSession(
-    current: NotebookSession | null,
-  ): Promise<NotebookSession | null> {
-    if (current?.id && current.notebook_url && !current.project_id) {
-      return current;
-    }
-
-    const existing = await getNotebookSession();
-    if (existing?.id && existing.notebook_url && !existing.project_id) {
-      setActiveNotebookSession(existing);
-      return existing;
-    }
-
-    const created = await createNotebookSession();
-    setActiveNotebookSession(created);
-    return created?.id && created.notebook_url ? created : null;
-  }
-
-  async function fetchNotionConversations(session: NotebookSession) {
-    const token = await getGatewayAuthToken();
-    const headers: Record<string, string> = {};
-    if (token) headers.Authorization = `Bearer ${token}`;
-
-    return fetch(
-      `${GATEWAY_URL}/notebook/${session.id}/api/chat/conversations?source=notion`,
-      { headers },
-    );
-  }
-
-  async function loadNotionConversations(session: NotebookSession | null) {
+  async function loadNotionConversations() {
     setOverviewLoading(true);
     setOverviewError(null);
     try {
-      let overviewSession = await ensureOverviewSession(session);
-      if (!overviewSession?.id || !overviewSession.notebook_url) {
-        throw new Error("No notebook runtime available");
-      }
-
-      let resp = await fetchNotionConversations(overviewSession);
-      if ([401, 403, 404].includes(resp.status)) {
-        const latest = await getNotebookSession();
-        if (latest?.id && latest.notebook_url && !latest.project_id) {
-          overviewSession = latest;
-          setActiveNotebookSession(latest);
-        } else {
-          await deleteNotebookSession().catch(() => {});
-          overviewSession = await createNotebookSession();
-          setActiveNotebookSession(overviewSession);
-        }
-        resp = await fetchNotionConversations(overviewSession);
-      }
-
+      const resp = await fetchNotionTraceThreads();
       if (!resp.ok) {
         throw new Error(`HTTP ${resp.status}`);
       }
       const data = (await resp.json()) as {
-        conversations?: NotionConversation[];
+        threads?: ChatTraceThread[];
       };
       setNotionConversations(
-        (data.conversations ?? []).filter(
+        (data.threads ?? []).map(toNotionConversation).filter(
           (conversation) =>
             conversation.source === "notion" ||
             conversation.id.startsWith("session-notion-"),
@@ -405,7 +384,7 @@ export default function NotebooksPage() {
           } else {
             setActiveNotebookSession(session);
             setState("no-session");
-            void loadNotionConversations(session);
+            void loadNotionConversations();
             return;
           }
         }
@@ -638,7 +617,7 @@ export default function NotebooksPage() {
             <span>open notebook runtime</span>
           </button>
           <button
-            onClick={() => loadNotionConversations(activeNotebookSession)}
+            onClick={() => loadNotionConversations()}
             className="flex items-center gap-3 px-5 py-3 text-xs text-[var(--color-text-dim)] border border-[var(--color-border)] hover:border-[var(--color-text-dim)] hover:text-[var(--color-text)] transition-all tracking-wider uppercase"
             disabled={overviewLoading}
           >

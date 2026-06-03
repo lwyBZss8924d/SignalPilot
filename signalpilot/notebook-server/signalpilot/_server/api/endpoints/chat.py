@@ -1,9 +1,9 @@
 # Copyright 2026 SignalPilot. All rights reserved.
 """Chat persistence endpoints for the notebook frontend.
 
-When a SignalPilot gateway is available these endpoints forward to it. Local
-notebook sessions also need to work without that gateway, so gateway failures
-fall back to a small SQLite store in the workspace.
+Regular chat endpoints proxy the SignalPilot gateway with a local SQLite path
+for gateway-less local conversations. Notion trace conversations are loaded
+from the gateway-owned trace store.
 """
 
 from __future__ import annotations
@@ -20,13 +20,13 @@ from typing import TYPE_CHECKING, Any
 import httpx
 from starlette.responses import JSONResponse
 
-from signalpilot._server.auth.session_token import load_session_jwt
 from signalpilot._server.ai.chat_store import (
-    ChatTraceStore,
-    chat_store_path_for_app,
-    get_chat_trace_store,
+    GatewayChatTraceStore,
+    get_gateway_chat_trace_store,
+    local_chat_db_path_for_app,
 )
 from signalpilot._server.api.deps import AppState
+from signalpilot._server.auth.session_token import load_session_jwt
 from signalpilot._server.router import APIRouter
 
 if TYPE_CHECKING:
@@ -87,7 +87,7 @@ def _connect(db_path: Path) -> sqlite3.Connection:
 
 
 def _db_path(request: Request) -> Path:
-    return chat_store_path_for_app(AppState(request))
+    return local_chat_db_path_for_app(AppState(request))
 
 
 def _current_session_id(request: Request) -> str:
@@ -525,29 +525,29 @@ def _trace_event_messages(
     return _dedupe_final_json_messages(_merge_tool_only_trace_messages(messages))
 
 
-def _trace_store(request: Request) -> ChatTraceStore:
-    return get_chat_trace_store(_db_path(request))
+def _trace_store(_request: Request) -> GatewayChatTraceStore:
+    return get_gateway_chat_trace_store()
 
 
-def _trace_list_conversations(request: Request) -> dict[str, Any]:
-    threads = _trace_store(request).list_threads(_current_session_id(request))
+async def _trace_list_conversations(request: Request) -> dict[str, Any]:
+    threads = await _trace_store(request).list_threads(_current_session_id(request))
     return {"conversations": [_trace_conversation_row(row) for row in threads]}
 
 
-def _trace_list_recent_notion_conversations(request: Request) -> dict[str, Any]:
-    threads = _trace_store(request).list_threads_by_source("notion")
+async def _trace_list_recent_notion_conversations(request: Request) -> dict[str, Any]:
+    threads = await _trace_store(request).list_threads_by_source("notion")
     return {"conversations": [_trace_conversation_row(row) for row in threads]}
 
 
-def _trace_get_conversation(
+async def _trace_get_conversation(
     request: Request, conversation_id: str
 ) -> dict[str, Any] | None:
     store = _trace_store(request)
-    thread = store.get_thread(conversation_id)
+    thread = await store.get_thread(conversation_id)
     if thread is None:
         return None
     messages = _trace_event_messages(
-        store.get_events(conversation_id, after_index=-1)
+        await store.get_events(conversation_id, after_index=-1)
     )
     return {
         "conversation": _trace_conversation_row(thread),
@@ -753,9 +753,9 @@ async def create_conversation(request: Request) -> JSONResponse:
 @router.get("/conversations")
 async def list_conversations(request: Request) -> JSONResponse:
     if request.query_params.get("source") == "notion":
-        return JSONResponse(_trace_list_recent_notion_conversations(request))
+        return JSONResponse(await _trace_list_recent_notion_conversations(request))
 
-    traced = _trace_list_conversations(request)
+    traced = await _trace_list_conversations(request)
     if traced["conversations"]:
         return JSONResponse(traced)
 
@@ -770,13 +770,13 @@ async def list_conversations(request: Request) -> JSONResponse:
         local = _local_list_conversations(request)
         if local.get("conversations"):
             return JSONResponse(local)
-        return JSONResponse(_trace_list_recent_notion_conversations(request))
+        return JSONResponse(await _trace_list_recent_notion_conversations(request))
     if (
         isinstance(result, dict)
         and isinstance(result.get("conversations"), list)
         and len(result["conversations"]) == 0
     ):
-        fallback = _trace_list_recent_notion_conversations(request)
+        fallback = await _trace_list_recent_notion_conversations(request)
         if fallback["conversations"]:
             return JSONResponse(fallback)
     return _respond(result)
@@ -785,7 +785,7 @@ async def list_conversations(request: Request) -> JSONResponse:
 @router.get("/conversations/{conversation_id}")
 async def get_conversation(request: Request) -> JSONResponse:
     cid = request.path_params["conversation_id"]
-    traced = _trace_get_conversation(request, cid)
+    traced = await _trace_get_conversation(request, cid)
     if traced is not None:
         return JSONResponse(traced)
 

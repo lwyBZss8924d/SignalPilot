@@ -14,6 +14,7 @@ from urllib.parse import urljoin, urlparse, urlunparse
 import httpx
 import jwt
 
+from gateway.auth.jwt_secret import load_session_jwt_secret
 from gateway.db.models import NotionInstallationConfig
 from gateway.notion import client as notion_client
 from gateway.notion import formatting as notion_formatting
@@ -423,9 +424,7 @@ async def _create_final_comment(token: str, discussion_id: str, status: dict[str
 
 def mint_internal_notebook_jwt(org_id: str, user_id: str | None, scopes: list[str] | None = None) -> str:
     """Mint the internal JWT used by the notebook API for org-scoped work."""
-    secret = os.getenv("SIGNALPILOT_INTERNAL_JWT_SECRET") or os.getenv("SP_INTERNAL_JWT_SECRET")
-    if not secret:
-        raise RuntimeError("SIGNALPILOT_INTERNAL_JWT_SECRET is required for notebook calls")
+    secret = os.getenv("SIGNALPILOT_INTERNAL_JWT_SECRET") or os.getenv("SP_INTERNAL_JWT_SECRET") or load_session_jwt_secret()
     now = datetime.now(UTC)
     payload = {
         "iss": "signalpilot-gateway",
@@ -490,7 +489,12 @@ async def process_routed_comment_event(routed: RoutedNotionInstallation, payload
     comments = await notion_client.list_comments(token, block_id)
     trigger_comment = next((comment for comment in comments if comment.get("id") == comment_id), None)
     if trigger_comment is None:
-        return _ignored("comment_not_found", event_id=payload.get("id"), comment_id=comment_id, block_id=block_id)
+        try:
+            trigger_comment = await notion_client.retrieve_comment(token, str(comment_id))
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                return _ignored("comment_not_found", event_id=payload.get("id"), comment_id=comment_id, block_id=block_id)
+            raise
     if notion_client.is_bot_comment(trigger_comment):
         return _ignored("bot_comment", event_id=payload.get("id"), comment_id=comment_id)
     if not notion_client.comment_has_page_mention(trigger_comment, trigger_page_id):

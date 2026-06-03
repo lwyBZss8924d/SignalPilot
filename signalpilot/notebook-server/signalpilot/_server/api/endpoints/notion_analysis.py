@@ -1501,10 +1501,7 @@ def _markdown_table_cells(line: str) -> list[str] | None:
     stripped = line.strip()
     if "|" not in stripped:
         return None
-    if stripped.startswith("|"):
-        stripped = stripped[1:]
-    if stripped.endswith("|"):
-        stripped = stripped[:-1]
+    stripped = stripped.removeprefix("|").removesuffix("|")
     cells = [_strip_markdown_cell(cell) for cell in stripped.split("|")]
     return cells if len(cells) >= 2 else None
 
@@ -2055,8 +2052,7 @@ async def _run_analysis(
 ) -> None:
     from signalpilot._server.ai.chat_store import (
         ChatThread,
-        chat_store_path_for_app,
-        get_chat_trace_store,
+        get_gateway_chat_trace_store,
     )
     from signalpilot._server.ai.claude_agent import (
         buffer_event,
@@ -2078,9 +2074,17 @@ async def _run_analysis(
 
     prompt = _analysis_prompt(record, body)
     text_parts: list[str] = []
-    db_path = chat_store_path_for_app(app_state)
-    store = get_chat_trace_store(db_path)
-    store.upsert_thread(
+    store = get_gateway_chat_trace_store()
+
+    async def append_trace_event(event_data: dict[str, Any]) -> int:
+        buffer_event(
+            record.session_id,
+            event_data,
+            thread_id=record.session_id,
+        )
+        return await store.append_event(record.session_id, event_data)
+
+    await store.upsert_thread(
         ChatThread(
             thread_id=record.session_id,
             session_id=record.session_id,
@@ -2099,9 +2103,8 @@ async def _run_analysis(
     )
     try:
         clear_event_buffer(record.session_id, thread_id=record.session_id)
-        store.clear_events(record.session_id)
-        buffer_event(
-            record.session_id,
+        await store.clear_events(record.session_id)
+        await append_trace_event(
             {
                 "type": "user",
                 "role": "user",
@@ -2118,8 +2121,6 @@ async def _run_analysis(
                     "result": asdict(record.result) if record.result else None,
                 },
             },
-            thread_id=record.session_id,
-            db_path=db_path,
         )
         try:
             async with asyncio.timeout(_agent_timeout_seconds()):
@@ -2141,12 +2142,7 @@ async def _run_analysis(
                         "cost_usd": event.cost_usd,
                         "turn": event.turn,
                     }
-                    buffer_event(
-                        record.session_id,
-                        event_data,
-                        thread_id=record.session_id,
-                        db_path=db_path,
-                    )
+                    await append_trace_event(event_data)
                     if event.type == "text" and event.content:
                         text_parts.append(event.content)
                     if event.type == "error":
@@ -2157,8 +2153,7 @@ async def _run_analysis(
             record.result = _timeout_failure_result(timeout_seconds)
             record.status = "Done"
             record.error = None
-            buffer_event(
-                record.session_id,
+            await append_trace_event(
                 {
                     "type": "error",
                     "content": (
@@ -2176,11 +2171,9 @@ async def _run_analysis(
                         "status": record.status,
                     },
                 },
-                thread_id=record.session_id,
-                db_path=db_path,
             )
             _persist_record_completion_artifacts(app_state, record)
-            store.upsert_thread(
+            await store.upsert_thread(
                 ChatThread(
                     thread_id=record.session_id,
                     session_id=record.session_id,
@@ -2192,8 +2185,7 @@ async def _run_analysis(
                     notion_discussion_id=record.discussion_id,
                 )
             )
-            buffer_event(
-                record.session_id,
+            await append_trace_event(
                 {
                     "type": "done",
                     "content": "",
@@ -2209,8 +2201,6 @@ async def _run_analysis(
                         "result": asdict(record.result),
                     },
                 },
-                thread_id=record.session_id,
-                db_path=db_path,
             )
             return
 
@@ -2218,8 +2208,7 @@ async def _run_analysis(
             record.result = _parse_result("".join(text_parts))
         except Exception as parse_error:
             repair_parts: list[str] = []
-            buffer_event(
-                record.session_id,
+            await append_trace_event(
                 {
                     "type": "text",
                     "content": (
@@ -2233,8 +2222,6 @@ async def _run_analysis(
                     "cost_usd": None,
                     "turn": 0,
                 },
-                thread_id=record.session_id,
-                db_path=db_path,
             )
             try:
                 async with asyncio.timeout(min(120.0, _agent_timeout_seconds())):
@@ -2259,12 +2246,7 @@ async def _run_analysis(
                             "cost_usd": event.cost_usd,
                             "turn": event.turn,
                         }
-                        buffer_event(
-                            record.session_id,
-                            event_data,
-                            thread_id=record.session_id,
-                            db_path=db_path,
-                        )
+                        await append_trace_event(event_data)
                         if event.type == "text" and event.content:
                             repair_parts.append(event.content)
                         if event.type == "error":
@@ -2278,7 +2260,7 @@ async def _run_analysis(
         _persist_record_completion_artifacts(app_state, record)
         record.status = "Done"
         record.error = None
-        store.upsert_thread(
+        await store.upsert_thread(
             ChatThread(
                 thread_id=record.session_id,
                 session_id=record.session_id,
@@ -2290,8 +2272,7 @@ async def _run_analysis(
                 notion_discussion_id=record.discussion_id,
             )
         )
-        buffer_event(
-            record.session_id,
+        await append_trace_event(
             {
                 "type": "done",
                 "content": "",
@@ -2307,8 +2288,6 @@ async def _run_analysis(
                     "result": asdict(record.result) if record.result else None,
                 },
             },
-            thread_id=record.session_id,
-            db_path=db_path,
         )
     except Exception as e:
         LOGGER.exception("Notion analysis %s failed", record.request_id)
@@ -2330,7 +2309,7 @@ async def _run_analysis(
                 record.error = str(e)
         _persist_record_completion_artifacts(app_state, record)
         if failed:
-            store.upsert_thread(
+            await store.upsert_thread(
                 ChatThread(
                     thread_id=record.session_id,
                     session_id=record.session_id,
@@ -2342,8 +2321,7 @@ async def _run_analysis(
                     notion_discussion_id=record.discussion_id,
                 )
             )
-            buffer_event(
-                record.session_id,
+            await append_trace_event(
                 {
                     "type": "error",
                     "content": str(e),
@@ -2358,11 +2336,9 @@ async def _run_analysis(
                         "status": record.status,
                     },
                 },
-                thread_id=record.session_id,
-                db_path=db_path,
             )
         else:
-            store.upsert_thread(
+            await store.upsert_thread(
                 ChatThread(
                     thread_id=record.session_id,
                     session_id=record.session_id,
@@ -2374,8 +2350,7 @@ async def _run_analysis(
                     notion_discussion_id=record.discussion_id,
                 )
             )
-            buffer_event(
-                record.session_id,
+            await append_trace_event(
                 {
                     "type": "done",
                     "content": "",
@@ -2393,8 +2368,6 @@ async def _run_analysis(
                         else None,
                     },
                 },
-                thread_id=record.session_id,
-                db_path=db_path,
             )
     finally:
         _save_registry(app_state)

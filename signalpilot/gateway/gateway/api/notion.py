@@ -59,11 +59,13 @@ def _notion_redirect_uri(request: Request) -> str:
     return os.getenv("NOTION_OAUTH_REDIRECT_URI") or str(request.url_for("notion_oauth_callback"))
 
 
-def _webhook_verification_token() -> str:
+def _webhook_verification_token() -> str | None:
     value = os.getenv("NOTION_WEBHOOK_VERIFICATION_TOKEN") or os.getenv("WEBHOOK_VERIFICATION_TOKEN")
-    if not value:
-        raise HTTPException(status_code=503, detail="NOTION_WEBHOOK_VERIFICATION_TOKEN is not configured")
-    return value
+    if value:
+        return value
+    if os.getenv("SP_DEPLOYMENT_MODE", "local").lower() != "cloud":
+        return None
+    raise HTTPException(status_code=503, detail="NOTION_WEBHOOK_VERIFICATION_TOKEN is not configured")
 
 
 def _redirect_fallback_url() -> str:
@@ -450,14 +452,18 @@ async def receive_notion_webhook(
     if payload.get("verification_token"):
         return NotionWebhookResponse(status="verification_received")
 
-    try:
-        notion_webhooks.verify_notion_signature(
-            raw_body,
-            request.headers.get("x-notion-signature"),
-            _webhook_verification_token(),
-        )
-    except notion_webhooks.InvalidNotionSignature as exc:
-        raise HTTPException(status_code=401, detail=str(exc)) from exc
+    verification_token = _webhook_verification_token()
+    if verification_token:
+        try:
+            notion_webhooks.verify_notion_signature(
+                raw_body,
+                request.headers.get("x-notion-signature"),
+                verification_token,
+            )
+        except notion_webhooks.InvalidNotionSignature as exc:
+            raise HTTPException(status_code=401, detail=str(exc)) from exc
+    else:
+        logger.warning("Skipping Notion webhook signature verification in local mode")
 
     event_id = payload.get("id")
     if not event_id:

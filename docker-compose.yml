@@ -57,6 +57,8 @@ services:
       SP_PUBLIC_GATEWAY_PORT: "3300"
       SP_REPOS_DIR: /repos
       SP_WEB_URL: http://localhost:3200
+      SIGNALPILOT_NOTEBOOK_INTERNAL_URL: http://notebook:2718
+      SIGNALPILOT_NOTEBOOK_PUBLIC_URL: http://localhost:3200/notebook
       # Sandbox
       SP_SANDBOX_MANAGER_URL: http://sandbox:8080
       SP_SANDBOX_ENABLED: "true"

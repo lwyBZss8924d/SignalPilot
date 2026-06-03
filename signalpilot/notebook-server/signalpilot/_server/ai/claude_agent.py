@@ -129,7 +129,6 @@ def buffer_event(
     event_data: dict[str, Any],
     *,
     thread_id: str | None = None,
-    db_path: Path | None = None,
 ) -> int:
     """Add an event to the buffer. Returns the event index."""
     buffer_key = thread_id or session_id
@@ -140,12 +139,7 @@ def buffer_event(
     # Trim old events
     if len(buf) > MAX_BUFFER_EVENTS:
         _event_buffers[buffer_key] = buf[-MAX_BUFFER_EVENTS:]
-    idx = len(buf) - 1
-    if db_path is not None:
-        from signalpilot._server.ai.chat_store import get_chat_trace_store
-
-        idx = get_chat_trace_store(db_path).append_event(buffer_key, event_data)
-    return idx
+    return len(buf) - 1
 
 
 def get_buffered_events(

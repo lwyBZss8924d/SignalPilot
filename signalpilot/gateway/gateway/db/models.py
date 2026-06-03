@@ -602,6 +602,61 @@ class GatewayChatMessage(GatewayBase):
     )
 
 
+class GatewayChatTraceThread(GatewayBase):
+    """Durable agent trace thread metadata for notebook-originated chats."""
+
+    __tablename__ = "gateway_chat_trace_threads"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    org_id: Mapped[str] = mapped_column(String, nullable=False)
+    user_id: Mapped[str] = mapped_column(String, nullable=False)
+    thread_id: Mapped[str] = mapped_column(String, nullable=False)
+    session_id: Mapped[str] = mapped_column(String, nullable=False)
+    source: Mapped[str] = mapped_column(String(20), nullable=False)
+    title: Mapped[str] = mapped_column(String(500), nullable=False, default="")
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="active")
+    notebook_path: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    notion_request_page_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    notion_discussion_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    created_at: Mapped[float] = mapped_column(Float, nullable=False)
+    updated_at: Mapped[float] = mapped_column(Float, nullable=False)
+    metadata_json: Mapped[dict | None] = mapped_column(JSON)
+
+    __table_args__ = (
+        UniqueConstraint("org_id", "user_id", "thread_id", name="uq_gw_trace_thread_scope"),
+        Index("ix_gw_trace_threads_session", "org_id", "user_id", "session_id", "updated_at"),
+        Index("ix_gw_trace_threads_source", "org_id", "user_id", "source", "updated_at"),
+    )
+
+
+class GatewayChatTraceEvent(GatewayBase):
+    """Ordered trace event within a durable notebook chat thread."""
+
+    __tablename__ = "gateway_chat_trace_events"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    org_id: Mapped[str] = mapped_column(String, nullable=False)
+    user_id: Mapped[str] = mapped_column(String, nullable=False)
+    thread_id: Mapped[str] = mapped_column(String, nullable=False)
+    idx: Mapped[int] = mapped_column(Integer, nullable=False)
+    event_type: Mapped[str] = mapped_column(String(80), nullable=False)
+    role: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    content: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    tool_name: Mapped[str] = mapped_column(String(300), nullable=False, default="")
+    tool_input_json: Mapped[dict | list | str | int | float | bool | None] = mapped_column(JSON)
+    tool_call_id: Mapped[str] = mapped_column(String(200), nullable=False, default="")
+    is_error: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    cost_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
+    turn: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_at: Mapped[float] = mapped_column(Float, nullable=False)
+    metadata_json: Mapped[dict | None] = mapped_column(JSON)
+
+    __table_args__ = (
+        UniqueConstraint("org_id", "user_id", "thread_id", "idx", name="uq_gw_trace_event_scope_idx"),
+        Index("ix_gw_trace_events_thread_idx", "org_id", "user_id", "thread_id", "idx"),
+    )
+
+
 # ─── Agent Runs ──────────────────────────────────────────────────────────────
 
 

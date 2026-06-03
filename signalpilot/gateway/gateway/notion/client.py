@@ -594,6 +594,10 @@ async def list_comments(api_key: str, block_id: str) -> list[dict]:
     return data.get("results", [])
 
 
+async def retrieve_comment(api_key: str, comment_id: str) -> dict:
+    return await notion_json(api_key, "GET", f"/comments/{comment_id}")
+
+
 async def upload_file(api_key: str, *, filename: str, content_type: str, content: bytes) -> dict:
     created = await notion_json(
         api_key,

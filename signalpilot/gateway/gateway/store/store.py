@@ -1045,6 +1045,56 @@ class Store:
             self.session, org_id=oid, user_id=self.user_id or "local", conversation_id=conversation_id, **kwargs
         )
 
+    # ─── Chat Traces ─────────────────────────────────────────────────────────
+
+    async def upsert_chat_trace_thread(self, thread):
+        from . import chat_traces
+
+        oid = self._require_org_id()
+        return await chat_traces.upsert_thread(
+            self.session, org_id=oid, user_id=self.user_id or "local", thread=thread
+        )
+
+    async def clear_chat_trace_events(self, thread_id: str):
+        from . import chat_traces
+
+        oid = self._require_org_id()
+        return await chat_traces.clear_events(
+            self.session, org_id=oid, user_id=self.user_id or "local", thread_id=thread_id
+        )
+
+    async def append_chat_trace_event(self, thread_id: str, event):
+        from . import chat_traces
+
+        oid = self._require_org_id()
+        return await chat_traces.append_event(
+            self.session, org_id=oid, user_id=self.user_id or "local", thread_id=thread_id, event=event
+        )
+
+    async def list_chat_trace_threads(self, **kwargs):
+        from . import chat_traces
+
+        oid = self._require_org_id()
+        return await chat_traces.list_threads(
+            self.session, org_id=oid, user_id=self.user_id or "local", **kwargs
+        )
+
+    async def get_chat_trace_thread(self, thread_id: str):
+        from . import chat_traces
+
+        oid = self._require_org_id()
+        return await chat_traces.get_thread(
+            self.session, org_id=oid, user_id=self.user_id or "local", thread_id=thread_id
+        )
+
+    async def get_chat_trace_events(self, thread_id: str, **kwargs):
+        from . import chat_traces
+
+        oid = self._require_org_id()
+        return await chat_traces.get_events(
+            self.session, org_id=oid, user_id=self.user_id or "local", thread_id=thread_id, **kwargs
+        )
+
     # ─── Agent Runs ──────────────────────────────────────────────────────────
 
     async def create_agent_run(self, **kwargs):
