@@ -75,9 +75,12 @@ def assert_cloud_hardening_intact() -> None:
     pydantic settings instantiation (subprocess, test harness, misconfigured import).
 
     Enforced kill-switches and required settings (final list — extend only via spec revision):
-      CLERK_JWT_AUDIENCE          — must be non-empty in cloud mode (L-1)
-      SP_NOTEBOOK_NETWORK_POLICY  — case-insensitive "false" is forbidden unless
-                                    SP_NOTEBOOK_NETWORK_POLICY_CLOUD_ACK=1|true|yes (I-5)
+      CLERK_JWT_AUDIENCE          — optional Clerk client binding; when set,
+                                    auth/user.py validates JWT aud at request time.
+      SP_NOTEBOOK_NETWORK_POLICY  — case-insensitive "false" logs an explicit
+                                    cloud warning because gVisor + VPC CNI
+                                    NetworkPolicy currently breaks notebook
+                                    pod egress.
       SP_NOTEBOOK_RUNTIME_CLASS   — empty string is forbidden
       SP_NOTEBOOK_DIRECT_URL      — any non-empty value is forbidden
       SP_DISABLE_SANDBOX          — case-insensitive "true", "1", "yes" is forbidden
@@ -92,15 +95,11 @@ def assert_cloud_hardening_intact() -> None:
 
     violations: list[str] = []
 
-    # L-1: CLERK_JWT_AUDIENCE must be set in cloud mode. Without it, audience
-    # verification is skipped in _resolve_via_clerk, which means any Clerk-signed
-    # JWT for a different application would be accepted. Enforcement lives here
-    # (lifespan fail-fast) rather than at import time, per R7 lesson.
-    clerk_audience = os.environ.get("CLERK_JWT_AUDIENCE", "").strip()
-    if not clerk_audience:
-        violations.append("CLERK_JWT_AUDIENCE")
+    # Clerk's default session JWTs may not carry an aud claim. Keep
+    # CLERK_JWT_AUDIENCE as opt-in hardening: auth/user.py validates aud when
+    # configured and disables aud verification only when it is absent.
 
-    # SP_NOTEBOOK_NETWORK_POLICY=false is a hard-fail by default in cloud mode.
+    # SP_NOTEBOOK_NETWORK_POLICY=false disables full default-deny in cloud mode.
     # Full default-deny requires the AWS VPC CNI NetworkPolicy agent, whose eBPF
     # enforcement does NOT compose with gVisor pods (the runsc userspace netstack
     # egress isn't matched by the agent's ipBlock allow rules), so enabling it
@@ -109,21 +108,18 @@ def assert_cloud_hardening_intact() -> None:
     # independently closed by the IMDS hop-limit=1 (verified: a pod's IMDSv2 token
     # PUT times out) PLUS the always-on block-imds-egress NetworkPolicy.
     # Revisit if/when gVisor + VPC CNI NetworkPolicy interop is fixed upstream.
-    # I-5: To opt back into the relaxed mode, set SP_NOTEBOOK_NETWORK_POLICY_CLOUD_ACK=1|true|yes.
-    # This requires an explicit, auditable operator acknowledgement (mirrors SP_BYOK_ALLOW_CUSTOM_ENDPOINT).
+    # I-5: This used to require SP_NOTEBOOK_NETWORK_POLICY_CLOUD_ACK=1|true|yes.
+    # The active cloud demo can legitimately run with this set to false because
+    # VPC CNI NetworkPolicy and gVisor do not currently compose. Warn loudly at
+    # startup, but do not refuse to boot.
     netpol = os.environ.get("SP_NOTEBOOK_NETWORK_POLICY", "true").strip().lower()
     if netpol == "false":
-        netpol_ack = os.environ.get("SP_NOTEBOOK_NETWORK_POLICY_CLOUD_ACK", "").strip().lower()
-        if netpol_ack in _TRUTHY_VALUES:
-            logger.warning(
-                "SP_NOTEBOOK_NETWORK_POLICY=false in cloud mode: full default-deny is "
-                "disabled (gVisor + VPC CNI NetworkPolicy incompatibility). IMDS "
-                "credential theft remains blocked via hop-limit + block-imds-egress "
-                "policy; arbitrary outbound egress from notebooks is NOT restricted. "
-                "Operator acknowledged via SP_NOTEBOOK_NETWORK_POLICY_CLOUD_ACK."
-            )
-        else:
-            violations.append("SP_NOTEBOOK_NETWORK_POLICY")
+        logger.warning(
+            "SP_NOTEBOOK_NETWORK_POLICY=false in cloud mode: full default-deny is "
+            "disabled (gVisor + VPC CNI NetworkPolicy incompatibility). IMDS "
+            "credential theft remains blocked via hop-limit + block-imds-egress "
+            "policy; arbitrary outbound egress from notebooks is NOT restricted."
+        )
 
     runtime_class = os.environ.get("SP_NOTEBOOK_RUNTIME_CLASS", "").strip()
     if runtime_class == "":

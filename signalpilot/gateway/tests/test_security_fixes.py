@@ -850,14 +850,13 @@ class TestL1CookieCsrfOriginCheck:
         assert resp.json() == {"detail": "Forbidden."}
 
 
-# ─── L-1: CLERK_JWT_AUDIENCE hard-fail in cloud mode ─────────────────────────
+# ─── L-1: CLERK_JWT_AUDIENCE optional in cloud mode ──────────────────────────
 
 
 # Env vars that must be set to avoid other kill-switches tripping during L-1/I-5 tests.
 _CLOUD_HARDENING_BASE_ENV = {
     "SP_DEPLOYMENT_MODE": "cloud",
     "SP_NOTEBOOK_RUNTIME_CLASS": "gvisor",
-    "CLERK_JWT_AUDIENCE": "my-app",
     # R11 added SP_ALLOWED_ORIGINS to assert_cloud_hardening_intact; without it
     # these L-1/I-5 tests would trip the unrelated SP_ALLOWED_ORIGINS violation.
     "SP_ALLOWED_ORIGINS": "https://app.signalpilot.ai",
@@ -876,18 +875,20 @@ def _set_cloud_base(monkeypatch, **overrides) -> None:
     monkeypatch.delenv("SP_NOTEBOOK_NETWORK_POLICY_CLOUD_ACK", raising=False)
 
 
-class TestL1ClerkAudienceHardFailCloud:
-    """L-1: assert_cloud_hardening_intact() fails fast when CLERK_JWT_AUDIENCE is
-    unset or empty in cloud mode."""
+class TestL1ClerkAudienceCloud:
+    """L-1: CLERK_JWT_AUDIENCE remains optional at startup.
 
-    def test_cloud_mode_missing_audience_raises(self, monkeypatch) -> None:
+    Clerk's default session JWTs may not include an aud claim. The request-time
+    Clerk verifier still validates aud when CLERK_JWT_AUDIENCE is configured.
+    """
+
+    def test_cloud_mode_missing_audience_passes(self, monkeypatch) -> None:
         _set_cloud_base(monkeypatch)
         monkeypatch.delenv("CLERK_JWT_AUDIENCE", raising=False)
 
         from gateway.runtime.mode import assert_cloud_hardening_intact
 
-        with pytest.raises(RuntimeError, match="CLERK_JWT_AUDIENCE"):
-            assert_cloud_hardening_intact()
+        assert_cloud_hardening_intact()
 
     def test_cloud_mode_present_audience_passes(self, monkeypatch) -> None:
         _set_cloud_base(monkeypatch, CLERK_JWT_AUDIENCE="my-app")
@@ -904,31 +905,35 @@ class TestL1ClerkAudienceHardFailCloud:
 
         assert_cloud_hardening_intact()  # local mode: no checks
 
-    def test_cloud_mode_empty_string_audience_raises(self, monkeypatch) -> None:
+    def test_cloud_mode_empty_string_audience_passes(self, monkeypatch) -> None:
         _set_cloud_base(monkeypatch, CLERK_JWT_AUDIENCE="   ")
 
         from gateway.runtime.mode import assert_cloud_hardening_intact
 
-        with pytest.raises(RuntimeError, match="CLERK_JWT_AUDIENCE"):
-            assert_cloud_hardening_intact()
+        assert_cloud_hardening_intact()
 
 
-# ─── I-5: SP_NOTEBOOK_NETWORK_POLICY=false hard-fail with opt-in ─────────────
+# ─── I-5: SP_NOTEBOOK_NETWORK_POLICY=false warns in cloud mode ───────────────
 
 
-class TestI5NetworkPolicyOptOutHardFailCloud:
-    """I-5: SP_NOTEBOOK_NETWORK_POLICY=false must trigger RuntimeError in cloud
-    mode unless SP_NOTEBOOK_NETWORK_POLICY_CLOUD_ACK=1|true|yes is set."""
+class TestI5NetworkPolicyOptOutCloud:
+    """I-5: SP_NOTEBOOK_NETWORK_POLICY=false must not block boot.
 
-    def test_cloud_netpol_false_no_ack_raises(self, monkeypatch) -> None:
+    gVisor + VPC CNI NetworkPolicy currently breaks notebook pod egress in the
+    cloud demo, so the gateway logs a warning instead of hard-failing startup.
+    """
+
+    def test_cloud_netpol_false_no_ack_warns_only(self, monkeypatch, caplog) -> None:
         _set_cloud_base(monkeypatch)
         monkeypatch.setenv("SP_NOTEBOOK_NETWORK_POLICY", "false")
         monkeypatch.delenv("SP_NOTEBOOK_NETWORK_POLICY_CLOUD_ACK", raising=False)
 
         from gateway.runtime.mode import assert_cloud_hardening_intact
 
-        with pytest.raises(RuntimeError, match="SP_NOTEBOOK_NETWORK_POLICY"):
+        with caplog.at_level(logging.WARNING, logger="gateway.runtime.mode"):
             assert_cloud_hardening_intact()
+
+        assert any("SP_NOTEBOOK_NETWORK_POLICY=false" in r.message for r in caplog.records)
 
     def test_cloud_netpol_false_with_ack_warns_only(self, monkeypatch, caplog) -> None:
         _set_cloud_base(monkeypatch)
@@ -960,21 +965,21 @@ class TestI5NetworkPolicyOptOutHardFailCloud:
         assert_cloud_hardening_intact()  # local mode: no checks
 
     @pytest.mark.parametrize(
-        "ack,should_raise",
+        "ack",
         [
-            ("1", False),
-            ("true", False),
-            ("yes", False),
-            ("TRUE", False),
-            ("Yes", False),
-            ("", True),
-            ("0", True),
-            ("false", True),
-            ("no", True),
+            "1",
+            "true",
+            "yes",
+            "TRUE",
+            "Yes",
+            "",
+            "0",
+            "false",
+            "no",
         ],
     )
-    def test_cloud_netpol_false_ack_truthy_variants(
-        self, monkeypatch, ack: str, should_raise: bool
+    def test_cloud_netpol_false_ack_variants_warn_only(
+        self, monkeypatch, caplog, ack: str
     ) -> None:
         _set_cloud_base(monkeypatch)
         monkeypatch.setenv("SP_NOTEBOOK_NETWORK_POLICY", "false")
@@ -982,11 +987,10 @@ class TestI5NetworkPolicyOptOutHardFailCloud:
 
         from gateway.runtime.mode import assert_cloud_hardening_intact
 
-        if should_raise:
-            with pytest.raises(RuntimeError, match="SP_NOTEBOOK_NETWORK_POLICY"):
-                assert_cloud_hardening_intact()
-        else:
-            assert_cloud_hardening_intact()  # must not raise
+        with caplog.at_level(logging.WARNING, logger="gateway.runtime.mode"):
+            assert_cloud_hardening_intact()
+
+        assert any("SP_NOTEBOOK_NETWORK_POLICY=false" in r.message for r in caplog.records)
 
 
 # ─── L-6: org_id filter on session mutation helpers ──────────────────────────
