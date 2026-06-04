@@ -9,13 +9,15 @@ import re
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
-from urllib.parse import urljoin, urlparse, urlunparse
+from urllib.parse import urlparse, urlunparse
 
 import httpx
 import jwt
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from gateway.auth.jwt_secret import load_session_jwt_secret
 from gateway.db.models import NotionInstallationConfig
+from gateway.notebooks.session_service import NotebookRuntime, ensure_notion_notebook_session
 from gateway.notion import client as notion_client
 from gateway.notion import formatting as notion_formatting
 from gateway.notion.webhooks import RoutedNotionInstallation
@@ -236,22 +238,39 @@ def _failure_comment_rich_text(error: str, request_page_url: str) -> list[dict[s
     ]
 
 
-def _base_notebook_url(public: bool = False) -> str:
-    if public:
-        value = os.getenv("SIGNALPILOT_NOTEBOOK_PUBLIC_URL") or os.getenv("SIGNALPILOT_NOTEBOOK_URL")
-    else:
-        value = os.getenv("SIGNALPILOT_NOTEBOOK_INTERNAL_URL") or os.getenv("SIGNALPILOT_NOTEBOOK_URL")
-    if not value:
-        raise RuntimeError("SIGNALPILOT_NOTEBOOK_URL is not configured")
-    return value.rstrip("/")
+def _join_base_path(base: str, url: str) -> str:
+    return f"{base.rstrip('/')}/{url.lstrip('/')}"
 
 
-def _public_signalpilot_url(url: str) -> str:
-    base = _base_notebook_url(public=True)
+def _relative_url_for_base(url: str, base: str) -> str | None:
+    parsed = urlparse(url)
+    base_parsed = urlparse(base)
+    if parsed.scheme and not _same_origin(url, base):
+        return None
+
+    path = parsed.path
+    base_path = base_parsed.path.rstrip("/")
+    if base_path and path.startswith(base_path + "/"):
+        path = path[len(base_path) :]
+    elif base_path and path == base_path:
+        path = "/"
+    query = f"?{parsed.query}" if parsed.query else ""
+    return f"{path}{query}"
+
+
+def _public_signalpilot_url(url: str, runtime: NotebookRuntime | None = None) -> str:
+    if runtime is None:
+        return url
+    base = runtime.public_base_url
     try:
-        parsed = httpx.URL(urljoin(base + "/", url))
-        base_parsed = httpx.URL(base)
-        return str(parsed.copy_with(scheme=base_parsed.scheme, host=base_parsed.host, port=base_parsed.port))
+        parsed = urlparse(url)
+        if parsed.scheme:
+            for candidate_base in (runtime.internal_base_url, runtime.public_base_url):
+                relative = _relative_url_for_base(url, candidate_base)
+                if relative is not None:
+                    return _join_base_path(runtime.public_base_url, relative)
+            return url
+        return _join_base_path(base, url)
     except Exception:
         return url
 
@@ -275,11 +294,13 @@ def _default_port(scheme: str) -> int | None:
     return None
 
 
-def _internal_signalpilot_url(url: str) -> str:
-    internal_base = _base_notebook_url(public=False)
-    public_base = os.getenv("SIGNALPILOT_NOTEBOOK_PUBLIC_URL", "").rstrip("/")
+def _internal_signalpilot_url(url: str, runtime: NotebookRuntime | None = None) -> str:
+    if runtime is None:
+        return url
+    internal_base = runtime.internal_base_url
+    public_base = runtime.public_base_url
     try:
-        parsed = urlparse(urljoin(internal_base + "/", url))
+        parsed = urlparse(_join_base_path(internal_base, url) if not urlparse(url).scheme else url)
         internal_parsed = urlparse(internal_base)
         public_parsed = urlparse(public_base) if public_base else None
         is_absolute = bool(urlparse(url).scheme)
@@ -287,6 +308,11 @@ def _internal_signalpilot_url(url: str) -> str:
         is_public = public_parsed is not None and _same_origin(urlunparse(parsed), public_base)
         if is_absolute and not is_internal and not is_public:
             return url
+        if runtime is not None:
+            for candidate_base in (runtime.internal_base_url, runtime.public_base_url):
+                relative = _relative_url_for_base(urlunparse(parsed), candidate_base)
+                if relative is not None:
+                    return _join_base_path(runtime.internal_base_url, relative)
         rewritten = parsed._replace(
             scheme=internal_parsed.scheme,
             netloc=internal_parsed.netloc,
@@ -296,14 +322,14 @@ def _internal_signalpilot_url(url: str) -> str:
         return url
 
 
-def _with_public_chart_urls(status: dict[str, Any]) -> dict[str, Any]:
+def _with_public_chart_urls(status: dict[str, Any], runtime: NotebookRuntime | None = None) -> dict[str, Any]:
     charts = _status_charts(status)
     if not charts:
         return status
     return {
         **status,
         "notionCharts": [
-            {**chart, "url": _public_signalpilot_url(_chart_value(chart, "url"))}
+            {**chart, "url": _public_signalpilot_url(_chart_value(chart, "url"), runtime)}
             if _chart_value(chart, "url")
             else chart
             for chart in charts
@@ -343,9 +369,9 @@ def _chart_upload_candidates(status: dict[str, Any]) -> list[dict[str, Any]]:
     return candidates
 
 
-async def _fetch_chart_image(chart: dict[str, Any]) -> tuple[bytes, str]:
+async def _fetch_chart_image(chart: dict[str, Any], runtime: NotebookRuntime | None = None) -> tuple[bytes, str]:
     source_url = _chart_value(chart, "url")
-    fetch_url = _internal_signalpilot_url(source_url)
+    fetch_url = _internal_signalpilot_url(source_url, runtime)
     async with httpx.AsyncClient(timeout=30) as client:
         response = await client.get(fetch_url)
         response.raise_for_status()
@@ -355,14 +381,21 @@ async def _fetch_chart_image(chart: dict[str, Any]) -> tuple[bytes, str]:
     return response.content, content_type
 
 
-async def _upload_chart_images_to_notion(token: str, status: dict[str, Any]) -> dict[str, Any]:
+async def _upload_chart_images_to_notion(
+    token: str,
+    status: dict[str, Any],
+    runtime: NotebookRuntime | None = None,
+) -> dict[str, Any]:
     uploads: dict[str, dict[str, str]] = {}
     for index, chart in enumerate(_chart_upload_candidates(status)):
         source_url = _chart_value(chart, "url")
         if not source_url:
             continue
         try:
-            content, content_type = await _fetch_chart_image(chart)
+            if runtime is None:
+                content, content_type = await _fetch_chart_image(chart)
+            else:
+                content, content_type = await _fetch_chart_image(chart, runtime)
             filename = _chart_filename(chart, index, content_type)
             uploaded = await notion_client.upload_file(
                 token,
@@ -377,7 +410,7 @@ async def _upload_chart_images_to_notion(token: str, status: dict[str, Any]) -> 
             logger.warning(
                 "Could not upload Notion chart attachment %s from %s: %s",
                 _chart_title(chart),
-                _internal_signalpilot_url(source_url),
+                _internal_signalpilot_url(source_url, runtime),
                 exc,
             )
 
@@ -438,13 +471,19 @@ def mint_internal_notebook_jwt(org_id: str, user_id: str | None, scopes: list[st
     return jwt.encode(payload, secret, algorithm="HS256")
 
 
-async def _call_notebook(path: str, org_id: str, user_id: str | None, init: dict[str, Any] | None = None) -> dict:
-    base = _base_notebook_url(public=False)
+async def _call_notebook(
+    runtime: NotebookRuntime,
+    path: str,
+    org_id: str,
+    user_id: str | None,
+    init: dict[str, Any] | None = None,
+) -> dict:
+    base = runtime.internal_base_url.rstrip("/")
     token = mint_internal_notebook_jwt(org_id, user_id, ["notion:analysis:start", "notion:analysis:read"])
     async with httpx.AsyncClient(timeout=60) as client:
         response = await client.request(
             (init or {}).get("method", "GET"),
-            f"{base}{path}",
+            _join_base_path(base, path),
             headers={
                 "Content-Type": "application/json",
                 "Authorization": f"Bearer {token}",
@@ -456,11 +495,11 @@ async def _call_notebook(path: str, org_id: str, user_id: str | None, init: dict
         return response.json()
 
 
-async def _poll_analysis(request_id: str, org_id: str, user_id: str | None) -> dict:
+async def _poll_analysis(request_id: str, runtime: NotebookRuntime, org_id: str, user_id: str | None) -> dict:
     max_polls = int(os.getenv("SIGNALPILOT_MAX_POLLS", "300"))
     interval_ms = int(os.getenv("SIGNALPILOT_POLL_INTERVAL_MS", "5000"))
     for _ in range(max_polls):
-        status = await _call_notebook(f"/api/notion-analysis/status/{request_id}", org_id, user_id)
+        status = await _call_notebook(runtime, f"/api/notion-analysis/status/{request_id}", org_id, user_id)
         if status.get("status") in ("Done", "Failed"):
             return status
         await asyncio.sleep(interval_ms / 1000)
@@ -475,7 +514,12 @@ def _require_config(config: NotionInstallationConfig) -> tuple[str, str]:
     return config.trigger_page_id, config.requests_data_source_id
 
 
-async def process_routed_comment_event(routed: RoutedNotionInstallation, payload: dict) -> NotionCommentProcessResult:
+async def process_routed_comment_event(
+    routed: RoutedNotionInstallation,
+    payload: dict,
+    *,
+    db: AsyncSession,
+) -> NotionCommentProcessResult:
     """Run the comment-triggered Notion analysis workflow for a routed event."""
     token = routed.access_token
     trigger_page_id, requests_data_source_id = _require_config(routed.config)
@@ -549,7 +593,13 @@ async def process_routed_comment_event(routed: RoutedNotionInstallation, payload
     await notion_client.update_page_properties(token, request_page_id, {"Status": {"rich_text": _rich_text("Analyzing")}})
     await notion_client.create_comment(token, discussion_id=discussion_id, rich_text=_start_comment_rich_text(request_page_url))
     try:
+        runtime = await ensure_notion_notebook_session(
+            db,
+            routed.installation.org_id,
+            routed.installation.user_id,
+        )
         start = await _call_notebook(
+            runtime,
             "/api/notion-analysis/start",
             routed.installation.org_id,
             routed.installation.user_id,
@@ -582,11 +632,16 @@ async def process_routed_comment_event(routed: RoutedNotionInstallation, payload
         )
         raise
 
-    start_trail_url = _public_signalpilot_url(start.get("trailUrl") or "")
+    start_trail_url = _public_signalpilot_url(start.get("trailUrl") or "", runtime)
     await notion_client.update_page_properties(token, request_page_id, {"Trail URL": {"url": start_trail_url or None}})
 
     try:
-        final_status = await _poll_analysis(str(start["requestId"]), routed.installation.org_id, routed.installation.user_id)
+        final_status = await _poll_analysis(
+            str(start["requestId"]),
+            runtime,
+            routed.installation.org_id,
+            routed.installation.user_id,
+        )
     except Exception as exc:
         message = str(exc)
         await notion_client.update_page_properties(
@@ -603,14 +658,14 @@ async def process_routed_comment_event(routed: RoutedNotionInstallation, payload
         raise
 
     if final_status.get("status") == "Done" and not final_status.get("error"):
-        uploaded_status = await _upload_chart_images_to_notion(token, final_status)
-        final_status_for_notion = _with_public_chart_urls(uploaded_status)
+        uploaded_status = await _upload_chart_images_to_notion(token, final_status, runtime)
+        final_status_for_notion = _with_public_chart_urls(uploaded_status, runtime)
         await notion_client.update_page_properties(
             token,
             request_page_id,
             {
                 "Status": {"rich_text": _rich_text("Done")},
-                "Trail URL": {"url": _public_signalpilot_url(final_status_for_notion.get("trailUrl") or start_trail_url) or None},
+                "Trail URL": {"url": _public_signalpilot_url(final_status_for_notion.get("trailUrl") or start_trail_url, runtime) or None},
                 "Confidence score": {"number": final_status_for_notion.get("confidenceScore")},
                 "Summary": {"rich_text": _rich_text(final_status_for_notion.get("summary") or final_status_for_notion.get("finalAnswer") or "")},
             },

@@ -196,7 +196,7 @@ async def _process_notion_event_task(event_id: str, installation_id: str, payloa
             return
         routed = notion_webhooks.RoutedNotionInstallation(installation=installation, config=config, access_token=token)
         try:
-            result = await notion_analysis.process_routed_comment_event(routed, payload)
+            result = await notion_analysis.process_routed_comment_event(routed, payload, db=session)
         except Exception as exc:
             await notion_store.record_webhook_delivery(
                 session,

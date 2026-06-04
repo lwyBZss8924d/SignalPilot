@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+from unittest.mock import MagicMock
+
 import pytest
 
 from gateway.db.models import NotionInstallation, NotionInstallationConfig
+from gateway.notebooks.session_service import NotebookRuntime
 from gateway.notion import analysis as notion_analysis
 from gateway.notion import client as notion_client
 from gateway.notion.webhooks import RoutedNotionInstallation
@@ -76,6 +79,14 @@ async def test_start_comment_is_posted_before_notebook_call_failure(monkeypatch:
         calls.append("call_notebook")
         raise RuntimeError("notebook unavailable")
 
+    async def ensure_runtime(*args, **kwargs):
+        calls.append("ensure_runtime")
+        return NotebookRuntime(
+            session_id="session-1",
+            internal_base_url="http://10.0.0.5:2718/notebook/session-1",
+            public_base_url="https://app.test/notebook/session-1",
+        )
+
     monkeypatch.setattr(notion_client, "list_comments", list_comments)
     monkeypatch.setattr(notion_client, "query_request_page_by_source", query_request_page_by_source)
     monkeypatch.setattr(notion_client, "create_request_page", create_request_page)
@@ -85,10 +96,11 @@ async def test_start_comment_is_posted_before_notebook_call_failure(monkeypatch:
     monkeypatch.setattr(notion_client, "is_bot_comment", lambda _comment: False)
     monkeypatch.setattr(notion_client, "comment_has_page_mention", lambda *_args, **_kwargs: True)
     monkeypatch.setattr(notion_client, "extract_comment_text", lambda _comment: "Hello")
+    monkeypatch.setattr(notion_analysis, "ensure_notion_notebook_session", ensure_runtime)
     monkeypatch.setattr(notion_analysis, "_call_notebook", call_notebook)
 
     with pytest.raises(RuntimeError, match="notebook unavailable"):
-        await notion_analysis.process_routed_comment_event(routed, payload)
+        await notion_analysis.process_routed_comment_event(routed, payload, db=MagicMock())
 
     start_comment_index = next(index for index, call in enumerate(calls) if call.startswith("comment:I'm on it"))
     notebook_index = calls.index("call_notebook")
@@ -456,8 +468,57 @@ async def test_comment_without_trigger_page_mention_is_ignored(monkeypatch: pyte
     monkeypatch.setattr(notion_client, "comment_has_page_mention", lambda *_args, **_kwargs: False)
     monkeypatch.setattr(notion_analysis, "_call_notebook", call_notebook)
 
-    result = await notion_analysis.process_routed_comment_event(routed, payload)
+    result = await notion_analysis.process_routed_comment_event(routed, payload, db=MagicMock())
 
     assert result.status == "ignored"
     assert result.reason == "trigger_page_not_mentioned"
     assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_call_notebook_uses_runtime_pod_url_not_static_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    requests: list[dict] = []
+    runtime = NotebookRuntime(
+        session_id="session-1",
+        internal_base_url="http://10.0.0.5:2718/notebook/session-1",
+        public_base_url="https://app.test/notebook/session-1",
+    )
+
+    class _Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"requestId": "request-1"}
+
+    class _Client:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def request(self, method, url, headers=None, json=None):
+            requests.append({"method": method, "url": url, "headers": headers, "json": json})
+            return _Response()
+
+    monkeypatch.setenv("SIGNALPILOT_NOTEBOOK_INTERNAL_URL", "http://old-notebook:2718")
+    monkeypatch.setattr(notion_analysis.httpx, "AsyncClient", _Client)
+    monkeypatch.setattr(notion_analysis, "mint_internal_notebook_jwt", lambda *args, **kwargs: "jwt-1")
+
+    result = await notion_analysis._call_notebook(
+        runtime,
+        "/api/notion-analysis/start",
+        "org-1",
+        "user-1",
+        {"method": "POST", "json": {"prompt": "hello"}},
+    )
+
+    assert result == {"requestId": "request-1"}
+    assert requests[0]["method"] == "POST"
+    assert requests[0]["url"] == "http://10.0.0.5:2718/notebook/session-1/api/notion-analysis/start"
+    assert "old-notebook" not in requests[0]["url"]
+    assert requests[0]["headers"]["Authorization"] == "Bearer jwt-1"
