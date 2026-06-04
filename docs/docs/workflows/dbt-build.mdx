@@ -26,7 +26,7 @@ The `dbt-workflow` skill auto-loads. Claude reads the YML description to infer o
 
 ## Step 2 — Scan the project
 
-Claude calls `get_project` to find the dbt project, then `list_tables` to enumerate the available sources:
+Claude calls `list_workspace_projects` to find the dbt project, then `list_tables` to enumerate the available sources:
 
 <MiniCopyBlock
   label="list tables"
