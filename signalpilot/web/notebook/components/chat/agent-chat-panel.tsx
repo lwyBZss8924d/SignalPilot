@@ -54,7 +54,7 @@ const ApiKeySetup: React.FC<{ onConfigured: () => void }> = ({ onConfigured }) =
     setError("");
     try {
       const resp = await fetch(
-        `${runtimeManager.httpURL}api/agent/save-api-key`,
+        runtimeManager.getAgentURL("save-api-key").toString(),
         {
           method: "POST",
           headers: { "Content-Type": "application/json", ...(await runtimeManager.headers()) },

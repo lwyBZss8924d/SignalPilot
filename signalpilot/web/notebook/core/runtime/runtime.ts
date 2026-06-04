@@ -194,7 +194,7 @@ export class RuntimeManager {
     return this.formatHttpURL(`/api/ai/${path}`);
   }
 
-  getAgentURL(path: "auth-status" | "create" | "message" | "stop" | "status" | "list" | "events"): URL {
+  getAgentURL(path: "auth-status" | "create" | "message" | "stop" | "status" | "list" | "events" | "save-api-key"): URL {
     return this.formatHttpURL(`/api/agent/${path}`);
   }
 
