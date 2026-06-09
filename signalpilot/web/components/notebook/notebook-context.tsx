@@ -24,6 +24,8 @@ export interface NotebookConfig {
   branch?: string;
   /** File path from URL */
   file?: string;
+  /** Whether this org has a non-disconnected Notion OAuth installation. */
+  notionConnected?: boolean;
 }
 
 const NotebookContext = React.createContext<NotebookConfig | null>(null);

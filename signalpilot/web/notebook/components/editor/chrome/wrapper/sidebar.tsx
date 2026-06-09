@@ -24,12 +24,6 @@ function resolveNotebookProduct(product?: NotebookProduct): NotebookProduct {
   if (product) {
     return product;
   }
-  if (
-    typeof window !== "undefined" &&
-    window.location.pathname.startsWith("/notebooks")
-  ) {
-    return "notebooks";
-  }
   return "projects";
 }
 

@@ -58,12 +58,6 @@ function useNotebookProduct(): NotebookProduct {
   if (notebookConfig?.product) {
     return notebookConfig.product;
   }
-  if (
-    typeof window !== "undefined" &&
-    window.location.pathname.startsWith("/notebooks")
-  ) {
-    return "notebooks";
-  }
   return "projects";
 }
 

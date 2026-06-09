@@ -1,23 +1,28 @@
 "use client";
 
 import { useEffect, useState, useRef, useCallback } from "react";
-import { useSearchParams } from "next/navigation";
+import { usePathname, useSearchParams } from "next/navigation";
 import dynamic from "next/dynamic";
 import {
-  Loader2,
+  Check,
   Code,
   ExternalLink,
-  Square,
+  Github,
+  Loader2,
   Share2,
-  Check,
   RefreshCw,
+  Square,
 } from "lucide-react";
 import {
   createNotebookSession,
+  getGitHubInstallations,
   getNotebookSession,
+  getNotionOAuthInstallations,
+  getProjects,
   deleteNotebookSession,
   pingNotebookSession,
   getGatewayAuthToken,
+  getWorkspaceProjects,
   type NotebookSession,
 } from "~/lib/api";
 import { StatusDot } from "~/components/ui/data-viz";
@@ -27,7 +32,12 @@ import {
   type NotebookConfig,
 } from "~/components/notebook/notebook-context";
 import { NotebooksProjectsPaywall } from "~/components/billing/notebooks-projects-paywall";
+import { NotionIcon } from "~/components/branding/notion-icon";
 import { useSubscription } from "~/lib/subscription-context";
+import { DbtProjectActions } from "@/components/home/dbt-project-actions";
+import { DbtProjectList } from "@/components/home/dbt-project-list";
+import { Header } from "@/components/home/components";
+import { Button } from "@/components/ui/button";
 import { dbtProjectDirAtom } from "@/components/editor/dbt/use-dbt";
 import { gatewayBranchIdAtom as persistedGatewayBranchIdAtom } from "@/core/branch/branch-state";
 import { KnownQueryParams } from "@/core/constants";
@@ -92,12 +102,54 @@ type ChatTraceThread = {
   updated_at?: number;
 };
 
+type RuntimeMode = "project" | "notion-trail" | "notebook";
+type RuntimeProduct = "projects" | "notebooks";
+
+type OverviewState = {
+  loading: boolean;
+  projectCount: number;
+  githubConnected: boolean;
+  notionConnected: boolean;
+  error: string | null;
+};
+
 const BOOT_PHASE_LABELS: Record<string, string> = {
   health: "connecting to runtime...",
   notion: "loading trail...",
+  syncing: "syncing project files...",
   sessions: "preparing workspace...",
   ready: "running",
 };
+
+function resolveRuntimeMode({
+  project,
+  file,
+  sessionId,
+}: {
+  project: string;
+  file: string;
+  sessionId: string;
+}): RuntimeMode {
+  if (project) return "project";
+  if (isNotionTrailParams({ file, sessionId })) return "notion-trail";
+  return "notebook";
+}
+
+function hasUsableNotionInstallation(installations: Array<{ status?: string }>): boolean {
+  return installations.some((installation) => installation.status !== "disconnected");
+}
+
+function hasUsableGitHubInstallation(data: unknown): boolean {
+  const installations = Array.isArray(data)
+    ? data
+    : (data as { installations?: unknown[] } | null)?.installations ?? [];
+  return installations.some(
+    (installation) =>
+      installation !== null &&
+      typeof installation === "object" &&
+      (installation as { status?: string }).status !== "disconnected",
+  );
+}
 
 function IDEHeader({
   children,
@@ -123,15 +175,27 @@ function IDEHeader({
 export default function NotebooksPage() {
   const { toast } = useToast();
   const searchParams = useSearchParams();
+  const pathname = usePathname();
   const { planTier, isLoaded: subLoaded } = useSubscription();
+  const isExternalView = pathname?.startsWith("/notebook") ?? false;
 
   const isPaid = PAID_TIERS.includes(planTier);
   const gated = IS_CLOUD_MODE && subLoaded && !isPaid;
 
+  const urlProject = searchParams.get("project") || "";
+  const urlBranch = searchParams.get("branch") || "";
   const urlSessionId = searchParams.get("session_id") || "";
   const rawFile = searchParams.get("file") || "";
   const urlFile = rawFile === "__new__project" ? "" : rawFile;
-  const hasDeepLink = Boolean(urlFile || urlSessionId);
+  const runtimeMode = resolveRuntimeMode({
+    project: urlProject,
+    file: urlFile,
+    sessionId: urlSessionId,
+  });
+  const activeBranch = urlBranch || "main";
+  const hasDeepLink = runtimeMode === "project"
+    ? Boolean(urlProject)
+    : Boolean(urlFile || urlSessionId);
 
   const [state, setState] = useState<AppState>("loading");
   const [launchStatus, setLaunchStatus] = useState(hasDeepLink ? "connecting to pod..." : "");
@@ -141,8 +205,16 @@ export default function NotebooksPage() {
   const [notionConversations, setNotionConversations] = useState<
     NotionConversation[]
   >([]);
+  const [overview, setOverview] = useState<OverviewState>({
+    loading: true,
+    projectCount: 0,
+    githubConnected: false,
+    notionConnected: false,
+    error: null,
+  });
   const [overviewLoading, setOverviewLoading] = useState(false);
   const [overviewError, setOverviewError] = useState<string | null>(null);
+  const [projectListRefreshNonce, setProjectListRefreshNonce] = useState(0);
   const [copied, setCopied] = useState(false);
   const [bootPhase, setBootPhase] = useState<string>("health");
   const pingRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -208,7 +280,7 @@ export default function NotebooksPage() {
       path: urlFile,
       type: "notebook",
       sessionId: kernelSessionId,
-      name: urlFile.split("/").pop() || "Notion analysis",
+      name: urlFile.split("/").pop() || "Notion request",
     };
 
     try {
@@ -305,7 +377,7 @@ export default function NotebooksPage() {
   function toNotionConversation(thread: ChatTraceThread): NotionConversation {
     return {
       id: thread.thread_id,
-      title: thread.title || "Notion analysis",
+      title: thread.title || "Notion request",
       source: thread.source,
       status: thread.status,
       notebook_path: thread.notebook_path,
@@ -324,11 +396,20 @@ export default function NotebooksPage() {
     });
   }
 
-  async function resolveNotionThreadId(): Promise<string | undefined> {
+  async function resolveNotionThreadId(
+    notionConnected = overview.notionConnected,
+  ): Promise<string | undefined> {
     if (urlSessionId.startsWith("session-notion-")) {
       return urlSessionId;
     }
     if (!urlFile.startsWith("signalpilot-notion-analyses/")) {
+      return undefined;
+    }
+    const remembered = getRememberedNotionThreadId(urlFile);
+    if (remembered) {
+      return remembered;
+    }
+    if (!notionConnected) {
       return undefined;
     }
 
@@ -355,8 +436,27 @@ export default function NotebooksPage() {
     }
   }
 
-  async function buildConfig(sessionId: string, apiKey?: string): Promise<NotebookConfig> {
-    const kernelSessionId = await resolveNotionThreadId();
+  async function buildConfig(
+    sessionId: string,
+    apiKey?: string,
+    product: RuntimeProduct = runtimeMode === "project" ? "projects" : "notebooks",
+  ): Promise<NotebookConfig> {
+    if (product === "projects") {
+      return {
+        gatewayUrl: GATEWAY_URL,
+        notebookProxyUrl: NOTEBOOK_PROXY_URL,
+        product: "projects",
+        sessionId,
+        getToken: getGatewayAuthToken,
+        apiKey,
+        project: urlProject || undefined,
+        branch: urlProject ? activeBranch : undefined,
+        file: urlFile || undefined,
+        notionConnected: overview.notionConnected,
+      };
+    }
+
+    const kernelSessionId = await resolveNotionThreadId(overview.notionConnected);
     if (isNotionTrail(urlFile, kernelSessionId || urlSessionId)) {
       clearNotionTrailProjectState();
     }
@@ -373,10 +473,18 @@ export default function NotebooksPage() {
       kernelSessionId,
       apiKey,
       file: urlFile || undefined,
+      notionConnected: overview.notionConnected,
     };
   }
 
-  async function loadNotionConversations() {
+  async function loadNotionConversations(
+    notionConnected = overview.notionConnected,
+  ) {
+    if (!notionConnected) {
+      setOverviewError(null);
+      setNotionConversations([]);
+      return;
+    }
     setOverviewLoading(true);
     setOverviewError(null);
     try {
@@ -402,6 +510,44 @@ export default function NotebooksPage() {
     }
   }
 
+  async function loadOverview() {
+    setOverview((prev) => ({ ...prev, loading: true, error: null }));
+
+    const [projectsResult, githubResult, notionResult] = await Promise.allSettled([
+      getWorkspaceProjects("active")
+        .then((result) => result.total)
+        .catch(() => getProjects().then((projects) => projects.length)),
+      getGitHubInstallations(),
+      getNotionOAuthInstallations(),
+    ]);
+
+    const nextOverview: OverviewState = {
+      loading: false,
+      projectCount:
+        projectsResult.status === "fulfilled" ? projectsResult.value : 0,
+      githubConnected:
+        githubResult.status === "fulfilled" &&
+        hasUsableGitHubInstallation(githubResult.value),
+      notionConnected:
+        notionResult.status === "fulfilled" &&
+        hasUsableNotionInstallation(notionResult.value),
+      error:
+        projectsResult.status === "rejected" &&
+        githubResult.status === "rejected" &&
+        notionResult.status === "rejected"
+          ? "Could not load workspace overview"
+          : null,
+    };
+
+    setOverview(nextOverview);
+    if (nextOverview.notionConnected) {
+      await loadNotionConversations(true);
+    } else {
+      setOverviewError(null);
+      setNotionConversations([]);
+    }
+  }
+
   useEffect(() => {
     if (IS_CLOUD_MODE && !subLoaded) return;
     if (gated) {
@@ -412,6 +558,8 @@ export default function NotebooksPage() {
     let cancelled = false;
 
     async function init() {
+      setState((s) => (s === "booting" || s === "ready" ? s : "loading"));
+
       let apiKey: string | undefined;
       if (!IS_CLOUD_MODE) {
         try {
@@ -426,11 +574,24 @@ export default function NotebooksPage() {
       try {
         const session = await getNotebookSession() as any;
         if (!cancelled && session?.status === "running" && session.id && session.notebook_url) {
-          if (session.project_id) {
-            console.log("[notebooks] Project session mismatch — deleting stale session");
+          const sessionProject = session.project_id || "";
+          const sessionBranch = session.branch || "main";
+          if (runtimeMode === "project") {
+            if (sessionProject !== urlProject || sessionBranch !== activeBranch) {
+              console.log("[projects] Session project/branch mismatch — deleting stale session");
+              await deleteNotebookSession().catch(() => {});
+            } else {
+              const config = await buildConfig(session.id, apiKey, "projects");
+              setNotebookConfig(config);
+              setState("booting");
+              startPing();
+              return;
+            }
+          } else if (sessionProject) {
+            console.log("[projects] Project session mismatch — deleting stale session");
             await deleteNotebookSession().catch(() => {});
           } else if (hasDeepLink) {
-            const config = await buildConfig(session.id, apiKey);
+            const config = await buildConfig(session.id, apiKey, "notebooks");
             setNotebookConfig(config);
             setState("booting");
             startPing();
@@ -438,7 +599,7 @@ export default function NotebooksPage() {
           } else {
             setActiveNotebookSession(session);
             setState("no-session");
-            void loadNotionConversations();
+            void loadOverview();
             return;
           }
         }
@@ -450,6 +611,7 @@ export default function NotebooksPage() {
         await launch(apiKey);
       } else if (!cancelled) {
         setState("no-session");
+        void loadOverview();
       }
     }
 
@@ -462,26 +624,41 @@ export default function NotebooksPage() {
 
   useEffect(() => {
     if (notebookConfig && (state === "ready" || state === "booting")) {
+      const nextProduct: RuntimeProduct = urlProject
+        ? "projects"
+        : isNotionTrail(urlFile, urlSessionId)
+          ? "notebooks"
+          : notebookConfig.product ?? "notebooks";
       const newFile = urlFile || undefined;
-      const newKernelSessionId = urlSessionId.startsWith("session-notion-")
+      const newKernelSessionId = nextProduct === "notebooks" && urlSessionId.startsWith("session-notion-")
         ? urlSessionId
         : notebookConfig.kernelSessionId;
+      const newProject = nextProduct === "projects" ? urlProject || undefined : undefined;
+      const newBranch = nextProduct === "projects" && urlProject ? activeBranch : undefined;
       if (
+        nextProduct !== notebookConfig.product ||
+        newProject !== notebookConfig.project ||
+        newBranch !== notebookConfig.branch ||
         newFile !== notebookConfig.file ||
-        newKernelSessionId !== notebookConfig.kernelSessionId
+        newKernelSessionId !== notebookConfig.kernelSessionId ||
+        overview.notionConnected !== notebookConfig.notionConnected
       ) {
         setNotebookConfig((prev) =>
           prev
             ? {
                 ...prev,
+                product: nextProduct,
+                project: newProject,
+                branch: newBranch,
                 file: newFile,
                 kernelSessionId: newKernelSessionId,
+                notionConnected: overview.notionConnected,
               }
             : prev,
         );
       }
     }
-  }, [urlFile, urlSessionId, state]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [urlProject, urlBranch, urlFile, urlSessionId, state, overview.notionConnected]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if (!notebookConfig?.kernelSessionId?.startsWith("session-notion-")) {
@@ -493,9 +670,12 @@ export default function NotebooksPage() {
     primeNotionTrailEditorState(notebookConfig.kernelSessionId);
   }, [notebookConfig?.kernelSessionId]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  async function launch(existingApiKey?: string) {
+  async function launch(
+    existingApiKey?: string,
+    product: RuntimeProduct = runtimeMode === "project" ? "projects" : "notebooks",
+  ) {
     setState("loading");
-    setLaunchStatus("creating session...");
+    setLaunchStatus(product === "projects" ? "creating project workspace..." : "creating notebook runtime...");
     try {
       let apiKey = existingApiKey;
       if (!apiKey && !IS_CLOUD_MODE) {
@@ -508,7 +688,11 @@ export default function NotebooksPage() {
         }
       }
 
-      const session = await createNotebookSession();
+      const session = await createNotebookSession(
+        product === "projects" && urlProject
+          ? { project_id: urlProject, branch: activeBranch }
+          : { project_id: null },
+      );
       setActiveNotebookSession(session);
       if (!session.id) {
         toast("Session created but no ID returned", "error");
@@ -516,7 +700,7 @@ export default function NotebooksPage() {
         return;
       }
       setLaunchStatus("waiting for pod...");
-      const config = await buildConfig(session.id, apiKey);
+      const config = await buildConfig(session.id, apiKey, product);
 
       setNotebookConfig(config);
       setState("booting");
@@ -537,11 +721,12 @@ export default function NotebooksPage() {
     setNotebookConfig(null);
     setActiveNotebookSession(null);
     setNotionConversations([]);
+    void loadOverview();
     if (pingRef.current) { clearInterval(pingRef.current); pingRef.current = null; }
   }
 
   function getEffectiveNotebookConfig(config: NotebookConfig): NotebookConfig {
-    if (!isNotionTrail(urlFile, urlSessionId)) {
+    if (config.product !== "notebooks" || !isNotionTrail(urlFile, urlSessionId)) {
       return config;
     }
 
@@ -575,6 +760,35 @@ export default function NotebooksPage() {
     }
   }
 
+  function notebookPopoutHref(config: NotebookConfig): string {
+    const params = new URLSearchParams();
+    if (config.product === "projects") {
+      if (urlProject) params.set("project", urlProject);
+      if (urlProject) params.set("branch", activeBranch);
+      if (urlFile) params.set("file", urlFile);
+    } else {
+      if (urlFile) params.set("file", urlFile);
+      const sessionId = urlSessionId || config.kernelSessionId;
+      if (sessionId) params.set("session_id", sessionId);
+    }
+    const qs = params.toString();
+    return `/notebook${qs ? `?${qs}` : ""}`;
+  }
+
+  async function refreshOverview() {
+    await loadOverview();
+  }
+
+  async function refreshProjectsSurface() {
+    setProjectListRefreshNonce((nonce) => nonce + 1);
+    await loadOverview();
+  }
+
+  // ─── Render: Paywall (free-tier cloud users) ──────────────────
+  if (gated) {
+    return <NotebooksProjectsPaywall />;
+  }
+
   // ─── Render: Loading ──────────────────────────────────────────
   if (state === "loading") {
     return (
@@ -597,7 +811,10 @@ export default function NotebooksPage() {
   if ((state === "booting" || state === "ready") && notebookConfig) {
     const effectiveNotebookConfig = getEffectiveNotebookConfig(notebookConfig);
     const bootKey = [
+      effectiveNotebookConfig.product ?? "",
       effectiveNotebookConfig.sessionId,
+      effectiveNotebookConfig.project ?? "",
+      effectiveNotebookConfig.branch ?? "",
       effectiveNotebookConfig.file ?? "",
       effectiveNotebookConfig.kernelSessionId ?? "",
     ].join(":");
@@ -613,14 +830,16 @@ export default function NotebooksPage() {
                 {copied ? <Check className="w-3 h-3" /> : <Share2 className="w-3 h-3" />}
                 {copied ? "copied" : "share"}
               </button>
-              <a
-                href={`${GATEWAY_URL}/notebook/${effectiveNotebookConfig.sessionId}/`}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="flex items-center gap-1.5 px-3 py-1.5 text-[11px] text-[var(--color-text-dim)] border border-[var(--color-border)] hover:border-[var(--color-text-dim)] hover:text-[var(--color-text)] transition-all tracking-wider uppercase"
-              >
-                <ExternalLink className="w-3 h-3" /> external
-              </a>
+              {!isExternalView && (
+                <a
+                  href={notebookPopoutHref(effectiveNotebookConfig)}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="flex items-center gap-1.5 px-3 py-1.5 text-[11px] text-[var(--color-text-dim)] border border-[var(--color-border)] hover:border-[var(--color-text-dim)] hover:text-[var(--color-text)] transition-all tracking-wider uppercase"
+                >
+                  <ExternalLink className="w-3 h-3" /> external
+                </a>
+              )}
               <button
                 onClick={stop}
                 className="flex items-center gap-1.5 px-3 py-1.5 text-[11px] text-[var(--color-text-dim)] border border-[var(--color-border)] hover:border-[var(--color-error)] hover:text-[var(--color-error)] transition-all tracking-wider uppercase"
@@ -653,47 +872,107 @@ export default function NotebooksPage() {
     );
   }
 
-  // ─── Render: Paywall (free-tier cloud users) ──────────────────
-  if (gated) {
-    return <NotebooksProjectsPaywall />;
-  }
-
   // ─── Render: No session (landing) ─────────────────────────────
   return (
     <div className="p-8 animate-fade-in">
-      <div className="max-w-4xl mx-auto mt-16">
+      <div className="max-w-6xl mx-auto mt-16">
         <div className="flex items-center gap-3 mb-6">
           <Code className="w-6 h-6 text-[var(--color-text)]" />
           <h1 className="text-lg font-bold uppercase tracking-wider text-[var(--color-text)]">
-            SignalPilot notebooks
+            SignalPilot IDE
           </h1>
         </div>
         <div className="flex flex-wrap items-center gap-3 mb-8">
           <button
-            onClick={() => launch()}
+            onClick={() => launch(undefined, "notebooks")}
             className="flex items-center gap-3 px-5 py-3 bg-[var(--color-text)] text-[var(--color-bg)] text-xs font-medium tracking-wider uppercase transition-all hover:opacity-90"
           >
             <Code className="w-4 h-4" />
             <span>open notebook runtime</span>
           </button>
-          <button
-            onClick={() => loadNotionConversations()}
+          <a
+            href="/settings/github"
             className="flex items-center gap-3 px-5 py-3 text-xs text-[var(--color-text-dim)] border border-[var(--color-border)] hover:border-[var(--color-text-dim)] hover:text-[var(--color-text)] transition-all tracking-wider uppercase"
-            disabled={overviewLoading}
           >
-            {overviewLoading ? (
-              <Loader2 className="w-4 h-4 animate-spin" />
-            ) : (
-              <RefreshCw className="w-4 h-4" />
-            )}
-            <span>refresh</span>
-          </button>
+            <Github className="w-4 h-4" />
+            <span>connect github</span>
+          </a>
+          <a
+            href="/integrations"
+            className="flex items-center gap-3 px-5 py-3 text-xs text-[var(--color-text-dim)] border border-[var(--color-border)] hover:border-[var(--color-text-dim)] hover:text-[var(--color-text)] transition-all tracking-wider uppercase"
+          >
+            <NotionIcon className="w-4 h-4" />
+            <span>connect notion</span>
+          </a>
         </div>
-        <NotionConversationList
-          conversations={notionConversations}
-          loading={overviewLoading}
-          error={overviewError}
-        />
+
+        {overview.error && (
+          <div className="mb-4 border border-[var(--color-error)]/40 px-5 py-4 text-xs text-[var(--color-error)]">
+            {overview.error}
+          </div>
+        )}
+
+        <div className="mb-8">
+          <div className="mb-4">
+            <DbtProjectActions
+              onProjectCreated={refreshProjectsSurface}
+              openProjectOnComplete={false}
+              showGitHubImport={false}
+            />
+          </div>
+          <DbtProjectList
+            key={projectListRefreshNonce}
+            onRefresh={refreshProjectsSurface}
+          />
+        </div>
+
+        {overview.loading ? (
+          <div className="border border-[var(--color-border)] px-5 py-10 flex items-center justify-center gap-3 text-xs text-[var(--color-text-dim)] uppercase tracking-wider">
+            <Loader2 className="w-4 h-4 animate-spin" />
+            checking integrations...
+          </div>
+        ) : overview.notionConnected ? (
+          <>
+            <div className="mb-3">
+              <Header
+                Icon={NotionIcon}
+                control={
+                  <Button
+                    variant="text"
+                    size="xs"
+                    onClick={refreshOverview}
+                    disabled={overviewLoading}
+                    title="Refresh Notion requests"
+                  >
+                    {overviewLoading ? (
+                      <Loader2 size={14} className="animate-spin" />
+                    ) : (
+                      <RefreshCw size={14} />
+                    )}
+                  </Button>
+                }
+              >
+                Notion requests
+              </Header>
+            </div>
+            <NotionConversationList
+              conversations={notionConversations}
+              loading={overviewLoading}
+              error={overviewError}
+            />
+          </>
+        ) : (
+          <div className="border border-[var(--color-border)] px-5 py-10 text-sm text-[var(--color-text-dim)]">
+            <p>Connect Notion to generate notebook-backed requests from Notion comments.</p>
+            <a
+              href="/integrations"
+              className="inline-flex items-center gap-2 mt-4 px-4 py-2 text-[12px] text-[var(--color-bg)] bg-[var(--color-text)] hover:opacity-90 transition-all tracking-wider uppercase"
+            >
+              <NotionIcon className="w-3.5 h-3.5" />
+              connect notion
+            </a>
+          </div>
+        )}
       </div>
     </div>
   );
@@ -712,7 +991,7 @@ function NotionConversationList({
     return (
       <div className="border border-[var(--color-border)] px-5 py-10 flex items-center justify-center gap-3 text-xs text-[var(--color-text-dim)] uppercase tracking-wider">
         <Loader2 className="w-4 h-4 animate-spin" />
-        loading notion analyses...
+        loading notion requests...
       </div>
     );
   }
@@ -720,15 +999,17 @@ function NotionConversationList({
   if (error) {
     return (
       <div className="border border-[var(--color-error)]/40 px-5 py-4 text-xs text-[var(--color-error)]">
-        Could not load Notion analyses: {error}
+        Could not load Notion requests: {error}
       </div>
     );
   }
 
   if (conversations.length === 0) {
     return (
-      <div className="border border-[var(--color-border)] px-5 py-10 text-sm text-[var(--color-text-dim)]">
-        No Notion analysis notebooks yet.
+      <div className="py-8 text-center text-muted-foreground text-sm">
+        <NotionIcon className="mx-auto mb-2 h-6 w-6 opacity-40" />
+        <p>No Notion requests found.</p>
+        <p className="text-xs mt-1">@ SignalPilot in your Notion workspace.</p>
       </div>
     );
   }
@@ -738,8 +1019,8 @@ function NotionConversationList({
       {conversations.map((conversation) => {
         const file = conversation.notebook_path || "";
         const href = file
-          ? `/notebooks?file=${encodeURIComponent(file)}&session_id=${encodeURIComponent(conversation.id)}`
-          : `/notebooks?session_id=${encodeURIComponent(conversation.id)}`;
+          ? `/projects?file=${encodeURIComponent(file)}&session_id=${encodeURIComponent(conversation.id)}`
+          : `/projects?session_id=${encodeURIComponent(conversation.id)}`;
         const status = conversation.status || "saved";
         return (
           <a
@@ -749,7 +1030,7 @@ function NotionConversationList({
           >
             <div className="min-w-0 flex-1">
               <div className="text-sm text-[var(--color-text)] truncate">
-                {conversation.title || "Notion analysis"}
+                {conversation.title || "Notion request"}
               </div>
               <div className="text-[11px] text-[var(--color-text-dim)] font-mono truncate mt-1">
                 {file || conversation.id}

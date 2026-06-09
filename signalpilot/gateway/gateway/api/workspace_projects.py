@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from urllib.parse import urlparse
+
 from fastapi import APIRouter, HTTPException, Query, Request
 
 from ..config.k8s import _LOCAL_GATEWAY_URL_DEFAULT, get_k8s_settings
@@ -17,6 +19,14 @@ from .deps import ProjectsGate, StoreD
 # All workspace-project routes require the paid "projects" feature.
 # In local mode the tier resolves to "unlimited", so the gate is a no-op.
 router = APIRouter(prefix="/api", dependencies=[ProjectsGate])
+
+
+def _is_loopback_gateway_url(url: str) -> bool:
+    try:
+        hostname = urlparse(url).hostname
+    except ValueError:
+        return False
+    return hostname in {"localhost", "127.0.0.1", "::1"}
 
 
 async def _get_project_or_404(store, project_id: str) -> WorkspaceProjectInfo:
@@ -103,7 +113,11 @@ async def get_clone_url(project_id: str, store: StoreD, request: Request):
         # required. Server-configured value, not the inbound Host header, so the
         # R11-S-1 Host-spoofing protection holds.
         base_url = f"{configured}/git/{project_id}.git"
-    elif configured and configured != _LOCAL_GATEWAY_URL_DEFAULT:
+    elif (
+        configured
+        and configured != _LOCAL_GATEWAY_URL_DEFAULT
+        and not _is_loopback_gateway_url(configured)
+    ):
         base_url = f"{configured}/git/{project_id}.git"
     else:
         # Local-mode dev fallback only: derive from Host so localhost:<random> works.

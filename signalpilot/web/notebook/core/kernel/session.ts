@@ -62,8 +62,12 @@ function computeInitialSessionId(): SessionId {
     KnownQueryParams.sessionId,
   ) as SessionId | null;
   if (isSessionId(id)) {
+    const isNotebookSurfaceWithoutProject =
+      (url.pathname.startsWith("/projects") ||
+        url.pathname.startsWith("/notebook")) &&
+      !url.searchParams.has(KnownQueryParams.project);
     const shouldPreserveSessionId =
-      id.startsWith("session-notion-") || url.pathname.startsWith("/notebooks");
+      id.startsWith("session-notion-") || isNotebookSurfaceWithoutProject;
     if (!shouldPreserveSessionId) {
       updateQueryParams((params) => {
         if (params.has(KnownQueryParams.kiosk)) {

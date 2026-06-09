@@ -1,6 +1,5 @@
 import { useAtom, useSetAtom } from "jotai";
 import {
-  BookTextIcon,
   ChevronDownIcon,
   ChevronRightIcon,
   ChevronsDownUpIcon,
@@ -13,6 +12,7 @@ import {
 } from "lucide-react";
 import type React from "react";
 import { Suspense, use, useContext, useEffect, useMemo, useRef, useState } from "react";
+import { NotionIcon } from "~/components/branding/notion-icon";
 import { SpEmbedConfigContext } from "@/embed/SpEmbedConfigContext";
 import {
   type NodeApi,
@@ -123,12 +123,49 @@ function mergeNotionNotebookFiles(
 const EMPTY_RUNNING_NOTEBOOKS = new Map<string, SpFile>();
 const EMPTY_RECENT_FILES: SpFile[] = [];
 
+type GatewayNotionThread = {
+  thread_id: string;
+  session_id?: string;
+  title?: string;
+  source?: string;
+  notebook_path?: string;
+  created_at?: number;
+  updated_at?: number;
+};
+
+function toNotionTraceFile(thread: GatewayNotionThread): SpFile | null {
+  const path = thread.notebook_path || (isSessionId(thread.thread_id) ? thread.thread_id : "");
+  if (!path) {
+    return null;
+  }
+
+  return {
+    name: thread.title || Paths.basename(path) || "Notion request",
+    path,
+    lastModified: thread.updated_at ?? thread.created_at ?? null,
+    sessionId: isSessionId(thread.thread_id) ? thread.thread_id : null,
+    initializationId: path,
+  };
+}
+
+function mergeFilesByPath(files: SpFile[]): SpFile[] {
+  const byPath = new Map<string, SpFile>();
+  for (const file of files) {
+    if (!byPath.has(file.path)) {
+      byPath.set(file.path, file);
+    }
+  }
+  return [...byPath.values()];
+}
+
 const HomePage: React.FC = () => {
   const [nonce, setNonce] = useState(0);
   // Hide the notebook's own settings/back-to-home buttons when embedded in the
   // SignalPilot app (/projects) — the app provides its own header/nav. They
   // still render in the standalone notebook view.
   const isEmbedded = useContext(SpEmbedConfigContext) !== null;
+  const notebookConfig = tryGetNotebookConfig();
+  const [gatewayNotionFiles, setGatewayNotionFiles] = useState<SpFile[]>([]);
 
   const recentsResponse = useAsyncData(
     () => apiCall<RecentFilesResponse>("/home/recent_files", {}),
@@ -161,11 +198,77 @@ const HomePage: React.FC = () => {
   const running = data?.[1] ?? EMPTY_RUNNING_NOTEBOOKS;
   const recentFiles = data?.[0]?.files ?? EMPTY_RECENT_FILES;
   const projectsProduct = isProjectsProduct();
+  const notionConnected = notebookConfig?.notionConnected ?? true;
   const runningFiles = useMemo(() => [...running.values()], [running]);
   const notionFiles = useMemo(
     () => mergeNotionNotebookFiles(runningFiles, recentFiles),
     [recentFiles, runningFiles],
   );
+  const combinedNotionFiles = useMemo(
+    () => mergeFilesByPath([...gatewayNotionFiles, ...notionFiles]),
+    [gatewayNotionFiles, notionFiles],
+  );
+  const plainRunningFiles = useMemo(
+    () => runningFiles.filter((file) => !isNotionNotebookFile(file)),
+    [runningFiles],
+  );
+  const plainRecentFiles = useMemo(
+    () => recentFiles.filter((file) => !isNotionNotebookFile(file)),
+    [recentFiles],
+  );
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadGatewayNotionFiles() {
+      if (!notebookConfig?.notionConnected || !notebookConfig.gatewayUrl) {
+        setGatewayNotionFiles([]);
+        return;
+      }
+
+      const headers: Record<string, string> = {};
+      const token = await notebookConfig.getToken().catch(() => null);
+      if (token) {
+        headers.Authorization = `Bearer ${token}`;
+      } else if (notebookConfig.apiKey) {
+        headers["X-API-Key"] = notebookConfig.apiKey;
+      }
+
+      try {
+        const gatewayUrl = notebookConfig.gatewayUrl.replace(/\/$/, "");
+        const resp = await fetch(`${gatewayUrl}/api/chat/traces/threads?source=notion`, {
+          headers,
+        });
+        if (!resp.ok) {
+          throw new Error(`HTTP ${resp.status}`);
+        }
+        const data = (await resp.json()) as { threads?: GatewayNotionThread[] };
+        const files = (data.threads ?? [])
+          .filter((thread) => thread.source === "notion" || thread.thread_id.startsWith("session-notion-"))
+          .map(toNotionTraceFile)
+          .filter((file): file is SpFile => file !== null);
+        if (!cancelled) {
+          setGatewayNotionFiles(files);
+        }
+      } catch (error) {
+        console.warn("Failed to load gateway Notion traces:", error);
+        if (!cancelled) {
+          setGatewayNotionFiles([]);
+        }
+      }
+    }
+
+    void loadGatewayNotionFiles();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    notebookConfig?.apiKey,
+    notebookConfig?.gatewayUrl,
+    notebookConfig?.getToken,
+    notebookConfig?.notionConnected,
+  ]);
 
   if (!data) {
     return <Spinner centered={true} size="xlarge" />;
@@ -200,17 +303,23 @@ const HomePage: React.FC = () => {
               <ErrorBoundary>
                 <DbtProjectList onRefresh={recentsResponse.refetch} />
               </ErrorBoundary>
+              {notionConnected && <NotionNotebookSection files={combinedNotionFiles} />}
               <NotebookList
                 header={<Header Icon={PlayCircleIcon}>Running notebooks</Header>}
-                files={runningFiles}
+                files={plainRunningFiles}
               />
               <NotebookList
                 header={<Header Icon={ClockIcon}>Recent notebooks</Header>}
-                files={recentFiles}
+                files={plainRecentFiles}
               />
             </>
           ) : (
-            <NotionNotebookHome files={notionFiles} />
+            <NotebookRuntimeHome
+              runningFiles={plainRunningFiles}
+              recentFiles={plainRecentFiles}
+              notionFiles={combinedNotionFiles}
+              notionConnected={notionConnected}
+            />
           )}
         </div>
       </RunningNotebooksContext>
@@ -218,18 +327,57 @@ const HomePage: React.FC = () => {
   );
 };
 
-const NotionNotebookHome: React.FC<{ files: SpFile[] }> = ({ files }) => {
+const NotebookRuntimeHome: React.FC<{
+  runningFiles: SpFile[];
+  recentFiles: SpFile[];
+  notionFiles: SpFile[];
+  notionConnected: boolean;
+}> = ({ runningFiles, recentFiles, notionFiles, notionConnected }) => {
+  const plainRunningFiles = runningFiles.filter((file) => !isNotionNotebookFile(file));
+  const plainRecentFiles = recentFiles.filter((file) => !isNotionNotebookFile(file));
+
   return (
     <div className="flex flex-col gap-3">
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
         <CreateNewNotebook />
       </div>
       <NotebookList
-        header={<Header Icon={BookTextIcon}>Notion analyses</Header>}
+        header={<Header Icon={PlayCircleIcon}>Running notebooks</Header>}
+        files={plainRunningFiles}
+      />
+      <NotebookList
+        header={<Header Icon={ClockIcon}>Recent notebooks</Header>}
+        files={plainRecentFiles}
+      />
+      {notionConnected ? (
+        <NotionNotebookSection files={notionFiles} />
+      ) : (
+        <div className="border border-border bg-card px-5 py-10 text-sm text-muted-foreground">
+          <p>Connect Notion to generate notebook-backed requests from Notion comments.</p>
+          <a
+            href="/integrations"
+            className="mt-4 inline-flex items-center gap-2 px-4 py-2 text-xs uppercase tracking-wider bg-foreground text-background hover:opacity-90 transition-opacity"
+          >
+            <NotionIcon className="h-3.5 w-3.5" />
+            connect notion
+          </a>
+        </div>
+      )}
+    </div>
+  );
+};
+
+const NotionNotebookSection: React.FC<{ files: SpFile[] }> = ({ files }) => {
+  return (
+    <div className="flex flex-col gap-3">
+      <NotebookList
+        header={<Header Icon={NotionIcon}>Notion requests</Header>}
         files={files}
         empty={
-          <div className="border border-border bg-card px-5 py-10 text-center text-sm text-muted-foreground">
-            No Notion analysis notebooks yet.
+          <div className="py-8 text-center text-muted-foreground text-sm">
+            <NotionIcon className="mx-auto mb-2 h-6 w-6 opacity-40" />
+            <p>No Notion requests found.</p>
+            <p className="text-xs mt-1">@ SignalPilot in your Notion workspace.</p>
           </div>
         }
       />
@@ -605,6 +753,7 @@ const SpFileComponent = ({ file }: { file: SpFile }) => {
   const { runningNotebooks } = use(RunningNotebooksContext);
   const runningSession = runningNotebooks.get(file.path);
   const runningSessionId = runningSession?.sessionId ?? null;
+  const linkSessionId = runningSessionId ?? file.sessionId ?? null;
 
   // If path is a sessionId, then it has not been saved yet
   // We want to keep the sessionId in this case
@@ -615,8 +764,8 @@ const SpFileComponent = ({ file }: { file: SpFile }) => {
       )
     : asURL(
         `?file=${encodeURIComponent(file.path)}${
-          runningSessionId
-            ? `&session_id=${encodeURIComponent(runningSessionId)}`
+          linkSessionId
+            ? `&session_id=${encodeURIComponent(linkSessionId)}`
             : ""
         }`,
       );

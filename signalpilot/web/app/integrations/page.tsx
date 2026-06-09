@@ -24,6 +24,7 @@ import { SectionHeader } from "~/components/ui/section-header";
 import { useToast } from "~/components/ui/toast";
 import { ApiKeysSkeleton } from "~/components/ui/skeleton";
 import { NotebooksProjectsPaywall } from "~/components/billing/notebooks-projects-paywall";
+import { NotionIcon } from "~/components/branding/notion-icon";
 import { useSubscription } from "~/lib/subscription-context";
 
 const IS_CLOUD_MODE = process.env.NEXT_PUBLIC_DEPLOYMENT_MODE === "cloud";
@@ -161,7 +162,7 @@ function IntegrationsContent() {
               disabled={connecting}
               className="flex items-center gap-1.5 px-3 py-1.5 text-[12px] text-[var(--color-bg)] bg-[var(--color-text)] hover:opacity-90 transition-all tracking-wider uppercase disabled:opacity-30"
             >
-              {connecting ? <Loader2 className="w-3 h-3 animate-spin" /> : <Link className="w-3 h-3" />}
+              {connecting ? <Loader2 className="w-3 h-3 animate-spin" /> : <NotionIcon className="w-3 h-3" />}
               connect notion
             </button>
           )}
@@ -193,7 +194,7 @@ function IntegrationsContent() {
               disabled={connecting}
               className="inline-flex items-center gap-2 px-4 py-2 bg-[var(--color-text)] text-[var(--color-bg)] text-[12px] tracking-wider uppercase transition-all hover:opacity-90 disabled:opacity-30"
             >
-              {connecting ? <Loader2 className="w-3 h-3 animate-spin" /> : <Link className="w-3 h-3" />}
+              {connecting ? <Loader2 className="w-3 h-3 animate-spin" /> : <NotionIcon className="w-3 h-3" />}
               connect notion
             </button>
           </div>

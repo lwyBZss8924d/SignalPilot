@@ -13,7 +13,7 @@ def test_trail_url_uses_sp_web_url_not_runtime_proxy(monkeypatch) -> None:
     )
 
     expected = (
-        "https://app.signalpilot.ai/notebooks?"
+        "https://app.signalpilot.ai/projects?"
         "file=signalpilot-notion-analyses/analysis.py"
         "&session_id=session-notion-abc123"
     )
@@ -21,11 +21,11 @@ def test_trail_url_uses_sp_web_url_not_runtime_proxy(monkeypatch) -> None:
     assert "/notebook/runtime-session-1/notebooks" not in url
 
 
-def test_notebooks_base_url_appends_notebooks_to_runtime_fallback(monkeypatch) -> None:
+def test_notebooks_base_url_appends_projects_to_runtime_fallback(monkeypatch) -> None:
     monkeypatch.delenv("SP_WEB_URL", raising=False)
 
     url = notion_urls.notebooks_base_url(
         "http://localhost:2718/notebook/runtime-session-1/"
     )
 
-    assert url == "http://localhost:2718/notebook/runtime-session-1/notebooks"
+    assert url == "http://localhost:2718/notebook/runtime-session-1/projects"

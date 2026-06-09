@@ -72,7 +72,7 @@ def _web_app_fallback_redirect(request: Request) -> RedirectResponse | None:
     web_url = os.environ.get("SP_WEB_URL")
     if not web_url:
         return None
-    target = f"{web_url.rstrip('/')}/notebooks"
+    target = f"{web_url.rstrip('/')}/projects"
     if request.url.query:
         target = f"{target}?{request.url.query}"
     return RedirectResponse(

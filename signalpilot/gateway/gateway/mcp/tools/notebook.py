@@ -197,7 +197,7 @@ async def run_notebook(
     from urllib.parse import quote
     web_url = os.getenv("SP_WEB_URL", "https://app.signalpilot.ai").rstrip("/")
     notebook_url = (
-        f"{web_url}/notebooks"
+        f"{web_url}/projects"
         f"?file={quote(safe_path.as_posix())}&session_id={quote(session_id or '')}"
     )
 

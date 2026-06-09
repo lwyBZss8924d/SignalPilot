@@ -8,8 +8,10 @@ def notebooks_base_url(request_base_url: str) -> str:
     base_url = (os.environ.get("SP_WEB_URL") or request_base_url).rstrip("/")
     parsed = urlparse(base_url)
     path = parsed.path.rstrip("/")
-    if not path.endswith("/notebooks"):
-        path = f"{path}/notebooks" if path else "/notebooks"
+    if path.endswith("/notebooks"):
+        path = f"{path.removesuffix('/notebooks')}/projects"
+    elif not path.endswith("/projects"):
+        path = f"{path}/projects" if path else "/projects"
     return urlunparse(
         parsed._replace(path=path, params="", query="", fragment="")
     ).rstrip("/")

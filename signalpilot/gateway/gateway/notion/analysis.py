@@ -251,11 +251,22 @@ def _public_web_base_url(runtime: NotebookRuntime) -> str:
 
 def _is_notebooks_path(path: str) -> bool:
     normalized = f"/{path.lstrip('/')}".rstrip("/") or "/"
-    return normalized == "/notebooks" or normalized.startswith("/notebooks/")
+    return (
+        normalized == "/notebooks"
+        or normalized.startswith("/notebooks/")
+        or normalized == "/projects"
+        or normalized.startswith("/projects/")
+    )
 
 
 def _path_query_fragment(parsed: Any) -> str:
     result = parsed.path or "/"
+    normalized = f"/{result.lstrip('/')}"
+    normalized_without_trailing = normalized.rstrip("/") or "/"
+    if normalized_without_trailing == "/notebooks":
+        result = "/projects"
+    elif normalized.startswith("/notebooks/"):
+        result = f"/projects/{normalized.removeprefix('/notebooks/')}"
     if parsed.query:
         result = f"{result}?{parsed.query}"
     if parsed.fragment:

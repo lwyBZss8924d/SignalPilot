@@ -126,7 +126,7 @@ def test_public_signalpilot_url_preserves_durable_notebooks_trail_url() -> None:
         public_base_url="https://app.signalpilot.ai/notebook/runtime-session-1",
     )
     durable_url = (
-        "https://app.signalpilot.ai/notebooks?"
+        "https://app.signalpilot.ai/projects?"
         "file=signalpilot-notion-analyses%2Fanalysis.py&session_id=session-notion-abc123"
     )
 
@@ -152,7 +152,7 @@ def test_public_signalpilot_url_rewrites_internal_notebooks_trail_to_app_origin(
 
     assert (
         rewritten
-        == "https://app.signalpilot.ai/notebooks?"
+        == "https://app.signalpilot.ai/projects?"
         "file=signalpilot-notion-analyses/do-an-analysis-of-my-db-9a50e7.py"
         "&session_id=session-notion-97728a45b49a50e7"
     )
@@ -170,12 +170,13 @@ def test_public_signalpilot_url_rewrites_relative_notebooks_trail_to_app_origin(
     for url in (
         "/notebooks?file=signalpilot-notion-analyses/analysis.py&session_id=session-notion-abc123",
         "notebooks?file=signalpilot-notion-analyses/analysis.py&session_id=session-notion-abc123",
+        "/projects?file=signalpilot-notion-analyses/analysis.py&session_id=session-notion-abc123",
     ):
         rewritten = notion_analysis._public_signalpilot_url(url, runtime)
 
         assert (
             rewritten
-            == "https://app.signalpilot.ai/notebooks?"
+            == "https://app.signalpilot.ai/projects?"
             "file=signalpilot-notion-analyses/analysis.py&session_id=session-notion-abc123"
         )
 

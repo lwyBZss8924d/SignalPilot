@@ -18,10 +18,16 @@ import { request } from "~/lib/api";
 const GATEWAY_AUTH_URL = process.env.NEXT_PUBLIC_GATEWAY_URL || "http://localhost:3300";
 
 interface Props {
-  onProjectCreated: () => void;
+  onProjectCreated: () => void | Promise<void>;
+  openProjectOnComplete?: boolean;
+  showGitHubImport?: boolean;
 }
 
-export const DbtProjectActions: React.FC<Props> = ({ onProjectCreated }) => {
+export const DbtProjectActions: React.FC<Props> = ({
+  onProjectCreated,
+  openProjectOnComplete = true,
+  showGitHubImport = true,
+}) => {
   const [showCreate, setShowCreate] = useState(false);
   const [showImport, setShowImport] = useState(false);
 
@@ -37,27 +43,31 @@ export const DbtProjectActions: React.FC<Props> = ({ onProjectCreated }) => {
           <PlusIcon size={14} />
           Create new project
         </Button>
-        <Button
-          variant="outline"
-          size="sm"
-          className="gap-2"
-          onClick={() => setShowImport(!showImport)}
-        >
-          <GitBranchIcon size={14} />
-          Import from GitHub
-        </Button>
+        {showGitHubImport && (
+          <Button
+            variant="outline"
+            size="sm"
+            className="gap-2"
+            onClick={() => setShowImport(!showImport)}
+          >
+            <GitBranchIcon size={14} />
+            Import from GitHub
+          </Button>
+        )}
       </div>
 
       {showCreate && (
         <CreateProjectForm
           onClose={() => setShowCreate(false)}
           onCreated={onProjectCreated}
+          openProjectOnComplete={openProjectOnComplete}
         />
       )}
-      {showImport && (
+      {showGitHubImport && showImport && (
         <GitHubImportForm
           onClose={() => setShowImport(false)}
           onImported={onProjectCreated}
+          openProjectOnComplete={openProjectOnComplete}
         />
       )}
     </div>
@@ -76,8 +86,9 @@ const ADAPTERS = [
 
 const CreateProjectForm: React.FC<{
   onClose: () => void;
-  onCreated: () => void;
-}> = ({ onClose, onCreated }) => {
+  onCreated: () => void | Promise<void>;
+  openProjectOnComplete: boolean;
+}> = ({ onClose, onCreated, openProjectOnComplete }) => {
   const [name, setName] = useState("");
   const [adapter, setAdapter] = useState("duckdb");
   const [loading, setLoading] = useState(false);
@@ -105,6 +116,16 @@ const CreateProjectForm: React.FC<{
       });
 
       // 2. Scaffold dbt files into the bare repo via the notebook backend
+      if (!openProjectOnComplete) {
+        toast({
+          title: "Project created",
+          description: `Created ${name.trim()} (${adapter})`,
+        });
+        await onCreated();
+        onClose();
+        return;
+      }
+
       setGatewayProjectId(project.id);
       setGatewayBranchId(project.default_branch || "main");
 
@@ -247,8 +268,9 @@ interface GitHubInstallation {
 
 const GitHubImportForm: React.FC<{
   onClose: () => void;
-  onImported: () => void;
-}> = ({ onClose, onImported }) => {
+  onImported: () => void | Promise<void>;
+  openProjectOnComplete: boolean;
+}> = ({ onClose, onImported, openProjectOnComplete }) => {
   const [installations, setInstallations] = useState<GitHubInstallation[]>([]);
   const [repos, setRepos] = useState<GitHubRepo[]>([]);
   const [loadingInstalls, setLoadingInstalls] = useState(true);
@@ -322,6 +344,13 @@ const GitHubImportForm: React.FC<{
       }
 
       // Sync the project locally before navigating
+      if (!openProjectOnComplete) {
+        toast({ title: "Imported", description: `${repo.full_name} ready` });
+        await onImported();
+        onClose();
+        return;
+      }
+
       setGatewayProjectId(project.id);
       setGatewayBranchId(repo.default_branch);
 

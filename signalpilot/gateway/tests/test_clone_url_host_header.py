@@ -96,3 +96,31 @@ class TestCloneUrlHostHeader:
             )
 
         assert "localhost:12345" in result["clone_url"]
+
+    @pytest.mark.asyncio
+    async def test_clone_url_uses_host_header_in_local_mode_with_loopback_public_url(self, monkeypatch) -> None:
+        """Local Compose: browser public URL is loopback, but notebook clone URL uses gateway host."""
+        from gateway.api.workspace_projects import get_clone_url
+        from gateway.config.k8s import K8sSettings
+
+        monkeypatch.setenv("SP_DEPLOYMENT_MODE", "local")
+
+        fake_settings = MagicMock(spec=K8sSettings)
+        fake_settings.sp_public_gateway_url = "http://localhost:3300"
+
+        fake_store = MagicMock()
+        fake_store.get_workspace_project = AsyncMock(return_value=_make_project())
+
+        request = _make_request(host="gateway:3300", scheme="http")
+
+        with patch("gateway.api.workspace_projects.get_k8s_settings", return_value=fake_settings), \
+             patch("gateway.api.workspace_projects.is_cloud_mode", return_value=False), \
+             patch("gateway.git.repos.repo_exists", return_value=True):
+            result = await get_clone_url(
+                project_id="proj-test-789",
+                store=fake_store,
+                request=request,
+            )
+
+        assert result["clone_url"].startswith("http://gateway:3300/git/")
+        assert "localhost:3300" not in result["clone_url"]

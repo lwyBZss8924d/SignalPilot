@@ -18,10 +18,10 @@ export const ShutdownButton: React.FC<Props> = ({
     new URLSearchParams(window.location.search).has("project");
   const homePath =
     config?.product === "notebooks"
-      ? "/notebooks"
+      ? "/projects"
       : config?.product === "projects" || config?.project || queryHasProject
         ? "/projects"
-        : "/notebooks";
+        : "/projects";
 
   return (
     <Tooltip content={tooltip}>

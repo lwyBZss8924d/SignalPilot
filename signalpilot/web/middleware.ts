@@ -155,6 +155,16 @@ function isNotebookPath(pathname: string): boolean {
   return pathname.startsWith("/notebook/");
 }
 
+function isLegacyNotebooksPath(pathname: string): boolean {
+  return pathname === "/notebooks" || pathname.startsWith("/notebooks/");
+}
+
+function redirectLegacyNotebooks(req: NextRequest): NextResponse {
+  const target = req.nextUrl.clone();
+  target.pathname = target.pathname.replace(/^\/notebooks/, "/projects");
+  return NextResponse.redirect(target, 307);
+}
+
 function proxyNotebook(req: NextRequest): NextResponse {
   const target = new URL(
     req.nextUrl.pathname + req.nextUrl.search,
@@ -185,6 +195,10 @@ if (clerkEnabled) {
   ]);
 
   middlewareExport = clerkMiddleware(async (auth, req) => {
+    if (isLegacyNotebooksPath(req.nextUrl.pathname)) {
+      return redirectLegacyNotebooks(req);
+    }
+
     // Notebook paths proxy to gateway — no Clerk auth needed (gateway handles it)
     if (isNotebookPath(req.nextUrl.pathname)) {
       return proxyNotebook(req);
@@ -202,6 +216,10 @@ if (clerkEnabled) {
   });
 } else {
   middlewareExport = (req: NextRequest) => {
+    if (isLegacyNotebooksPath(req.nextUrl.pathname)) {
+      return redirectLegacyNotebooks(req);
+    }
+
     // Notebook paths proxy to gateway
     if (isNotebookPath(req.nextUrl.pathname)) {
       return proxyNotebook(req);
